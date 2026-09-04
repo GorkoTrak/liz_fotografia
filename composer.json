@@ -1,0 +1,11 @@
+{
+    "name": "liz/fotoestudio",
+    "description": "Sistema de gestión para Lizdy Pineda Fotoestudio",
+    "type": "project",
+    "require": {
+        "mpdf/mpdf": "^8.2"
+    },
+    "config": {
+        "optimize-autoloader": true
+    }
+}
