@@ -43,38 +43,100 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $cliente_id     = sanitizeInt($_POST['cliente_id'] ?? 0);
         $cita_id        = sanitizeInt($_POST['cita_id'] ?? 0) ?: null;
         $fecha_sesion   = sanitize($_POST['fecha_sesion'] ?? '');
-        $total          = floatval($_POST['total'] ?? 0);
-        $abono          = floatval($_POST['abono'] ?? 0);
-        $estado_pago    = sanitize($_POST['estado_pago'] ?? 'pendiente');
+        $abono          = max(0, floatval($_POST['abono'] ?? 0));
         $estado_entrega = sanitize($_POST['estado_entrega'] ?? 'pendiente');
         $notas          = sanitize($_POST['notas'] ?? '');
         $metodo_pago    = sanitize($_POST['metodo_pago'] ?? 'efectivo');
 
-        $servicios_ids = $_POST['producto_id'] ?? [];
-        if (!is_array($servicios_ids)) $servicios_ids = [$servicios_ids];
-        $servicios_ids = array_filter(array_map('intval', $servicios_ids));
-        $producto_id_principal = !empty($servicios_ids) ? (int)$servicios_ids[0] : null;
+        // Sesión principal.
+        $producto_id_principal = sanitizeInt($_POST['producto_principal_id'] ?? 0);
+        if (!$producto_id_principal) {
+            // Compatibilidad con el formulario anterior.
+            $legacyIds = $_POST['producto_id'] ?? [];
+            if (!is_array($legacyIds)) $legacyIds = [$legacyIds];
+            $legacyIds = array_filter(array_map('intval', $legacyIds));
+            $producto_id_principal = !empty($legacyIds) ? (int)$legacyIds[0] : 0;
+        }
 
-        if (!$cliente_id || !$fecha_sesion) {
-            $error = 'Cliente y fecha son obligatorios.';
+        // Adicionales y cantidades.
+        $adicional_ids = $_POST['adicional_id'] ?? [];
+        $adicional_cantidades = $_POST['adicional_cantidad'] ?? [];
+        if (!is_array($adicional_ids)) $adicional_ids = [$adicional_ids];
+        if (!is_array($adicional_cantidades)) $adicional_cantidades = [$adicional_cantidades];
+
+        $adicionales = [];
+        foreach ($adicional_ids as $idx => $aid) {
+            $aid = (int)$aid;
+            $cantidad = max(1, (int)($adicional_cantidades[$idx] ?? 1));
+            if ($aid > 0) $adicionales[$aid] = ($adicionales[$aid] ?? 0) + $cantidad;
+        }
+
+        $total = 0;
+        $precioPrincipal = 0;
+        if ($producto_id_principal > 0) {
+            $sp = $db->prepare("SELECT precio FROM productos WHERE id=? AND estado='activo' LIMIT 1");
+            $sp->bind_param("i", $producto_id_principal);
+            $sp->execute();
+            $productoPrincipal = $sp->get_result()->fetch_assoc();
+            $sp->close();
+            if ($productoPrincipal) {
+                $precioPrincipal = (float)$productoPrincipal['precio'];
+                $total = $precioPrincipal;
+            }
+        }
+
+        $preciosAdicionales = [];
+        foreach ($adicionales as $producto_id => $cantidad) {
+            $sp = $db->prepare("SELECT precio FROM productos WHERE id=? AND estado='activo' LIMIT 1");
+            $sp->bind_param("i", $producto_id);
+            $sp->execute();
+            $producto = $sp->get_result()->fetch_assoc();
+            $sp->close();
+            if ($producto) {
+                $precio = (float)$producto['precio'];
+                $preciosAdicionales[$producto_id] = $precio;
+                $total += $precio * $cantidad;
+            }
+        }
+
+        if (!$cliente_id || !$fecha_sesion || !$producto_id_principal || !$precioPrincipal) {
+            $error = 'Cliente, fecha y tipo de sesión son obligatorios.';
         } else {
+            // El estado de pago se calcula automáticamente según el abono.
+            if ($abono > $total) $abono = $total;
+            $estado_pago = ($total > 0 && $abono >= $total) ? 'pagado' : ($abono > 0 ? 'abonado' : 'pendiente');
+
             if ($id > 0) {
-                // Obtener estado anterior para detectar cambio a pagado
+                // Obtener estado anterior para detectar cambios de ingreso.
                 $prev = $db->query("SELECT estado_pago, total, abono FROM sesiones WHERE id=$id")->fetch_assoc();
 
                 $stmt = $db->prepare("UPDATE sesiones SET cliente_id=?,cita_id=?,producto_id=?,fecha_sesion=?,total=?,abono=?,estado_pago=?,estado_entrega=?,notas=?,metodo_pago=? WHERE id=?");
                 $stmt->bind_param("iiisddssssi", $cliente_id,$cita_id,$producto_id_principal,$fecha_sesion,$total,$abono,$estado_pago,$estado_entrega,$notas,$metodo_pago,$id);
                 $stmt->execute(); $stmt->close();
 
-                // ── Actualizar factura vinculada automáticamente ──
+                // Reemplazar únicamente los adicionales de la sesión.
+                $stmtSP = $db->prepare("DELETE FROM sesion_productos WHERE sesion_id=?");
+                $stmtSP->bind_param("i", $id);
+                $stmtSP->execute();
+                $stmtSP->close();
+
+                foreach ($preciosAdicionales as $producto_id => $precioProducto) {
+                    $cantidad = (int)$adicionales[$producto_id];
+                    $si = $db->prepare("INSERT INTO sesion_productos (sesion_id, producto_id, cantidad, precio) VALUES (?, ?, ?, ?)");
+                    $si->bind_param("iiid", $id, $producto_id, $cantidad, $precioProducto);
+                    $si->execute();
+                    $si->close();
+                }
+
+                // Actualizar factura vinculada automáticamente.
                 $estadoFac = ($total > 0 && $abono >= $total) ? 'pagada' : ($abono > 0 ? 'abonada' : 'pendiente');
                 $sfac = $db->prepare("UPDATE facturas SET total=?, abono=?, metodo_pago=?, estado=? WHERE sesion_id=?");
                 $sfac->bind_param("ddssi", $total, $abono, $metodo_pago, $estadoFac, $id);
                 $sfac->execute(); $sfac->close();
 
-                // Si cambió a pagado → registrar ingreso automático
-                if ($prev['estado_pago'] !== 'pagado' && $estado_pago === 'pagado') {
-                    $montoIngreso = $total - $prev['abono'];
+                // Si cambió a pagado, registrar ingreso automático.
+                if ($prev && $prev['estado_pago'] !== 'pagado' && $estado_pago === 'pagado') {
+                    $montoIngreso = $total - (float)$prev['abono'];
                     if ($montoIngreso > 0) {
                         $concepto  = "Pago sesión – " . date('d/m/Y', strtotime($fecha_sesion));
                         $fecha_hoy = $fecha_sesion;
@@ -83,9 +145,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $si->execute(); $si->close();
                     }
                 }
-                // Si el abono aumentó → registrar la diferencia en ingresos
-                if ($prev['estado_pago'] !== 'pagado' && $abono > $prev['abono']) {
-                    $diff = $abono - $prev['abono'];
+                // Si el abono aumentó, registrar la diferencia.
+                if ($prev && $abono > (float)$prev['abono']) {
+                    $diff = $abono - (float)$prev['abono'];
                     $concepto  = "Abono sesión – " . date('d/m/Y', strtotime($fecha_sesion));
                     $fecha_hoy = $fecha_sesion;
                     $si = $db->prepare("INSERT INTO ingresos (cliente_id, concepto, monto, tipo, metodo_pago, fecha) VALUES (?,?,?,'ingreso',?,?)");
@@ -100,7 +162,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $nuevaSesionId = $stmt->insert_id;
                 $stmt->close();
 
-                // ── Generar factura automáticamente ──
+                foreach ($preciosAdicionales as $producto_id => $precioProducto) {
+                    $cantidad = (int)$adicionales[$producto_id];
+                    $si = $db->prepare("INSERT INTO sesion_productos (sesion_id, producto_id, cantidad, precio) VALUES (?, ?, ?, ?)");
+                    $si->bind_param("iiid", $nuevaSesionId, $producto_id, $cantidad, $precioProducto);
+                    $si->execute();
+                    $si->close();
+                }
+
+                // Generar factura automáticamente.
                 $anio = date('Y');
                 $rNum = $db->query("SELECT COUNT(*) as t FROM facturas WHERE YEAR(fecha_emision)=$anio");
                 $numFac = $rNum->fetch_assoc()['t'] + 1;
@@ -110,15 +180,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $sfac->bind_param("iisddss", $nuevaSesionId, $cliente_id, $numero_factura, $total, $abono, $metodo_pago, $estadoFac);
                 $sfac->execute(); $sfac->close();
 
-                // Si se crea ya pagado, registrar ingreso
-                if ($estado_pago === 'pagado' && $total > 0) {
-                    $concepto  = "Pago sesión – " . date('d/m/Y', strtotime($fecha_sesion));
-                    $fecha_hoy = $fecha_sesion;
-                    $si = $db->prepare("INSERT INTO ingresos (cliente_id, concepto, monto, tipo, metodo_pago, fecha) VALUES (?,?,?,'ingreso',?,?)");
-                    $si->bind_param("isdss", $cliente_id, $concepto, $total, $metodo_pago, $fecha_hoy);
-                    $si->execute(); $si->close();
-                } elseif ($abono > 0) {
-                    $concepto  = "Abono sesión – " . date('d/m/Y', strtotime($fecha_sesion));
+                if ($abono > 0) {
+                    $concepto  = ($estado_pago === 'pagado' ? "Pago sesión – " : "Abono sesión – ") . date('d/m/Y', strtotime($fecha_sesion));
                     $fecha_hoy = $fecha_sesion;
                     $si = $db->prepare("INSERT INTO ingresos (cliente_id, concepto, monto, tipo, metodo_pago, fecha) VALUES (?,?,?,'ingreso',?,?)");
                     $si->bind_param("isdss", $cliente_id, $concepto, $abono, $metodo_pago, $fecha_hoy);
@@ -224,6 +287,20 @@ $pagina       = max(1, sanitizeInt($_GET['p'] ?? 1));
 $porPagina    = 12;
 $offset       = ($pagina - 1) * $porPagina;
 
+// ── Adicionales asociados a cada sesión ──
+$adicionalesPorSesion = [];
+$rSP = $db->query("SELECT sesion_id, producto_id, cantidad, precio FROM sesion_productos ORDER BY id ASC");
+if ($rSP) {
+    while ($rowSP = $rSP->fetch_assoc()) {
+        $sidSP = (int)$rowSP['sesion_id'];
+        $adicionalesPorSesion[$sidSP][] = [
+            'producto_id' => (int)$rowSP['producto_id'],
+            'cantidad' => max(1, (int)$rowSP['cantidad']),
+            'precio' => (float)$rowSP['precio']
+        ];
+    }
+}
+
 $fechaIni = "$anioC-$mesC-01";
 $fechaFin = "$anioC-$mesC-$diasMes";
 $stmtCal  = $db->prepare("SELECT s.*,cl.nombre,cl.apellido,p.nombre AS servicio FROM sesiones s JOIN clientes cl ON s.cliente_id=cl.id LEFT JOIN productos p ON s.producto_id=p.id WHERE s.fecha_sesion BETWEEN ? AND ? ORDER BY s.fecha_sesion,s.id");
@@ -232,6 +309,13 @@ $stmtCal->execute();
 $sesionesCalendario = [];
 $res = $stmtCal->get_result();
 while ($row = $res->fetch_assoc()) {
+    $sid = (int)$row['id'];
+
+    // Adicionales con cantidades para poder recuperar la edición.
+    $row['adicionales'] = $adicionalesPorSesion[$sid] ?? [];
+    // Compatibilidad con el formato anterior.
+    $row['servicios_ids'] = array_map(function($a){ return (int)$a['producto_id']; }, $row['adicionales']);
+
     $d = (int)(new DateTime($row['fecha_sesion']))->format('j');
     $sesionesCalendario[$d][] = $row;
 }
@@ -262,6 +346,18 @@ $stmtL->execute();
 $listadoSesiones = $stmtL->get_result();
 $stmtL->close();
 
+// Datos completos para que Editar funcione desde calendario y listado sin depender del onclick.
+$sesionesParaJS = [];
+$rJS = $db->query("SELECT s.*,cl.nombre,cl.apellido,cl.telefono,p.nombre AS servicio FROM sesiones s JOIN clientes cl ON s.cliente_id=cl.id LEFT JOIN productos p ON s.producto_id=p.id ORDER BY s.fecha_sesion DESC,s.id DESC");
+if ($rJS) {
+    while ($rowJS = $rJS->fetch_assoc()) {
+        $sidJS = (int)$rowJS['id'];
+        $rowJS['adicionales'] = $adicionalesPorSesion[$sidJS] ?? [];
+        $rowJS['servicios_ids'] = array_map(function($a){ return (int)$a['producto_id']; }, $rowJS['adicionales']);
+        $sesionesParaJS[] = $rowJS;
+    }
+}
+
 // Sesión seleccionada para galería
 $sesionGaleriaId = sanitizeInt($_GET['galeria'] ?? 0);
 $fotosGaleria = [];
@@ -274,7 +370,7 @@ if ($sesionGaleriaId) {
 }
 
 $todosClientes  = $db->query("SELECT id,nombre,apellido,telefono FROM clientes ORDER BY nombre ASC");
-$todosProductos = $db->query("SELECT id,nombre,precio FROM productos WHERE estado='activo' ORDER BY nombre ASC");
+$todosProductos = $db->query("SELECT id,nombre,descripcion,precio,tipo,categoria FROM productos WHERE estado='activo' ORDER BY nombre ASC");
 $mesesNombres   = ['','Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
 $diasNombres    = ['Lun','Mar','Mié','Jue','Vie','Sáb','Dom'];
 $avClasses      = ['av-a','av-b','av-c','av-d','av-e'];
@@ -429,6 +525,27 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
   .upload-zone{border:2px dashed var(--rose-light);border-radius:12px;padding:24px;text-align:center;cursor:pointer;transition:all .2s;margin:16px;}
   .upload-zone:hover{border-color:var(--rose);background:var(--rose-pale);}
   .upload-zone input{display:none;}
+  /* BUSCADORES DE sesiones y adicionales */
+  .producto-picker{position:relative;display:flex;flex-direction:column;gap:7px;}
+  .producto-categoria{padding:8px 12px;font-size:11.5px;}
+  .producto-dropdown{display:none;position:absolute;top:calc(100% - 1px);left:0;right:0;background:var(--surface);border:1.5px solid var(--border);border-radius:10px;max-height:220px;overflow-y:auto;z-index:1000;box-shadow:0 6px 20px rgba(180,120,160,.18);}
+  .producto-dropdown.open{display:block;}
+  .producto-option{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:9px 12px;cursor:pointer;border-bottom:1px solid var(--border);font-size:11.5px;color:var(--navy);}
+  .producto-option:last-child{border-bottom:none;}
+  .producto-option:hover{background:var(--rose-pale);}
+  .producto-option strong{display:block;font-weight:700;}
+  .producto-option small{display:block;color:var(--text-dim);font-size:9.5px;margin-top:2px;}
+  .producto-option span{white-space:nowrap;font-weight:700;color:var(--rose-deep);}
+  .producto-empty{padding:12px;text-align:center;color:var(--text-dim);font-size:11px;}
+  .producto-seleccionado{align-items:center;justify-content:space-between;gap:8px;background:var(--rose-pale);border:1.5px solid var(--rose-light);border-radius:10px;padding:8px 10px;font-size:11.5px;font-weight:700;color:var(--navy);}
+  .producto-seleccionado b{margin-left:auto;color:var(--rose-deep);}
+  .producto-seleccionado button{width:22px;height:22px;border-radius:50%;border:0;background:var(--rose-light);color:var(--rose-deep);cursor:pointer;font-weight:700;}
+  .adicionales-lista{display:flex;flex-direction:column;gap:7px;margin-top:8px;}
+  .adicional-item{display:flex;align-items:center;gap:7px;background:var(--teal-pale);border:1.5px solid var(--teal-light);border-radius:10px;padding:7px 9px;}
+  .adicional-info{flex:1;min-width:0;}
+  .adicional-info strong{display:block;font-size:11.5px;color:var(--navy);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .adicional-info small{display:block;font-size:9px;color:var(--text-dim);margin-top:2px;}
+  .adicional-cantidad{width:60px!important;padding:6px 7px!important;text-align:center;}
   /* MODAL */
   .modal-overlay{display:none;position:fixed;inset:0;background:rgba(26,31,60,.45);z-index:100;align-items:center;justify-content:center;backdrop-filter:blur(2px);}
   .modal-overlay.open{display:flex;}
@@ -523,7 +640,7 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
           <?php if(empty($sesionesDelDia)): ?>
             <div class="empty-dia">Sin sesiones este día</div>
           <?php else: $i=0; foreach($sesionesDelDia as $se): $colorCls=$coloresBloque[$i%3]; ?>
-          <div class="ses-block <?= $colorCls ?>" onclick="editarSesion(<?= htmlspecialchars(json_encode($se)) ?>)">
+          <div class="ses-block <?= $colorCls ?>" onclick="editarSesionPorId(<?= (int)$se['id'] ?>)">
             <div class="ses-nombre"><?= htmlspecialchars($se['nombre'].' '.$se['apellido']) ?></div>
             <div class="ses-service"><?= htmlspecialchars($se['servicio']??'Sin servicio') ?></div>
             <div class="ses-monto"><?= formatoPeso($se['total']) ?>
@@ -540,8 +657,9 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
                 </select>
               </form>
               <span class="status-pill pill-<?= $se['estado_pago'] ?>"><?= ucfirst($se['estado_pago']) ?></span>
-              <button class="btn btn-teal btn-sm" onclick="event.stopPropagation();abrirGaleria(<?= $se['id'] ?>, '<?= htmlspecialchars($se['nombre'].' '.$se['apellido']) ?>')">📷 Fotos</button>
-              <button class="btn btn-danger btn-sm" onclick="event.stopPropagation();confirmarEliminar(<?= $se['id'] ?>,'<?= htmlspecialchars($se['nombre'].' '.$se['apellido']) ?>')">Eliminar</button>
+              <button class="btn btn-teal btn-sm" onclick="event.stopPropagation();abrirGaleria(<?= $se['id'] ?>, '<?= htmlspecialchars($se['nombre']) ?>')">📷 Fotos</button>
+              <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();editarSesionPorId(<?= $se['id'] ?>)">Editar</button>
+              <button class="btn btn-danger btn-sm" onclick="event.stopPropagation();confirmarEliminar(<?= $se['id'] ?>,'<?= htmlspecialchars($se['nombre']) ?>')">Eliminar</button>
             </div>
           </div>
           <?php $i++; endforeach; endif; ?>
@@ -560,7 +678,7 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
               <div class="cliente-search-wrapper">
                 <div class="cliente-search-input-row">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16" class="search-icon"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-                  <input type="text" id="qClienteSearch" class="form-input cliente-search-input" placeholder="Buscar por nombre o apellido..." autocomplete="off"
+                  <input type="text" id="qClienteSearch" class="form-input cliente-search-input" placeholder="Buscar por nombre o teléfono..." autocomplete="off"
                     oninput="filtrarClientes('qClienteSearch','qClienteDropdown','qClienteIdInput')"
                     onfocus="mostrarDropdown('qClienteDropdown')">
                 </div>
@@ -568,9 +686,9 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
                   <?php $todosClientes->data_seek(0); while($cl=$todosClientes->fetch_assoc()): ?>
                   <div class="cliente-option"
                     data-id="<?=$cl['id']?>"
-                    data-nombre="<?=htmlspecialchars($cl['nombre'].' '.$cl['apellido'])?>"
+                    data-nombre="<?=htmlspecialchars($cl['nombre'])?>" data-telefono="<?=htmlspecialchars($cl['telefono']??'')?>"
                     onclick="seleccionarCliente(this,'qClienteSearch','qClienteDropdown','qClienteIdInput')">
-                    <?=htmlspecialchars($cl['nombre'].' '.$cl['apellido'])?>
+                    <?=htmlspecialchars($cl['nombre'])?>
                   </div>
                   <?php endwhile; ?>
                 </div>
@@ -582,34 +700,39 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
               <input class="form-input" type="date" name="fecha_sesion" value="<?= "$anioC-".str_pad($mesC,2,'0',STR_PAD_LEFT)."-".str_pad($diaSeleccionado,2,'0',STR_PAD_LEFT) ?>" required>
             </div>
             <div class="form-group">
-              <label>Servicio(s)</label>
-              <div id="serviciosLista" class="servicios-lista">
-                <div class="servicio-item" id="servItem0">
-                  <select class="form-input" name="producto_id[]" id="qProducto0" style="border:none;background:transparent;padding:0;" onchange="autoTotal()">
-                    <option value="">— Sin servicio —</option>
-                    <?php $todosProductos->data_seek(0); while($pr=$todosProductos->fetch_assoc()): ?>
-                    <option value="<?=$pr['id']?>" data-precio="<?=$pr['precio']?>"><?=htmlspecialchars($pr['nombre'])?> — <?=formatoPeso($pr['precio'])?></option>
-                    <?php endwhile; ?>
-                  </select>
-                </div>
-              </div>
-              <div class="add-servicio-row" onclick="agregarServicio()">
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                ¿Agregar otro servicio?
+              <label>Tipo de sesión *</label>
+              <div class="producto-picker">
+                <input type="text" id="qSesionSearch" class="form-input" placeholder="Buscar sesión por nombre..." autocomplete="off" oninput="filtrarProductos('qSesionSearch','qSesionCategoria','qSesionDropdown','sesion')" onfocus="mostrarProductoDropdown('qSesionDropdown','qSesionSearch','sesion')">
+                <select id="qSesionCategoria" class="form-input producto-categoria" onchange="filtrarProductos('qSesionSearch','qSesionCategoria','qSesionDropdown','sesion')">
+                  <option value="">Todas las categorías</option>
+                </select>
+                <div class="producto-dropdown" id="qSesionDropdown"></div>
+                <input type="hidden" name="producto_principal_id" id="qSesionIdInput" required>
+                <div class="producto-seleccionado" id="qSesionSeleccionado" style="display:none;"></div>
               </div>
             </div>
+
+            <div class="form-group">
+              <label>Adicionales</label>
+              <div class="producto-picker">
+                <input type="text" id="qAdicionalSearch" class="form-input" placeholder="Buscar adicional por nombre..." autocomplete="off" oninput="filtrarProductos('qAdicionalSearch','qAdicionalCategoria','qAdicionalDropdown','adicional')" onfocus="mostrarProductoDropdown('qAdicionalDropdown','qAdicionalSearch','adicional')">
+                <select id="qAdicionalCategoria" class="form-input producto-categoria" onchange="filtrarProductos('qAdicionalSearch','qAdicionalCategoria','qAdicionalDropdown','adicional')">
+                  <option value="">Todas las categorías</option>
+                </select>
+                <div class="producto-dropdown" id="qAdicionalDropdown"></div>
+              </div>
+              <div id="qAdicionalesLista" class="adicionales-lista"></div>
+            </div>
+
             <hr class="divider">
             <div class="form-row">
-              <div class="form-group"><label>Total ($)</label><input class="form-input" type="number" name="total" id="qTotal" min="0" step="1000" placeholder="0"></div>
+              <div class="form-group"><label>Total ($)</label><input class="form-input" type="number" name="total" id="qTotal" min="0" step="1000" placeholder="0" readonly></div>
               <div class="form-group"><label>Abono ($)</label><input class="form-input" type="number" name="abono" id="qAbono" min="0" step="1000" placeholder="0"></div>
             </div>
             <div class="form-row">
               <div class="form-group"><label>Estado pago</label>
-                <select class="form-input" name="estado_pago" id="qEstadoPago">
-                  <option value="pendiente">Pendiente</option>
-                  <option value="abonado">Abonado</option>
-                  <option value="pagado">Pagado</option>
-                </select>
+                <input class="form-input" id="qEstadoPagoVista" value="Pendiente" readonly>
+                <input type="hidden" name="estado_pago" id="qEstadoPago" value="pendiente">
               </div>
               <div class="form-group"><label>Método pago</label>
                 <select class="form-input" name="metodo_pago">
@@ -621,7 +744,7 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
                 </select>
               </div>
             </div>
-            <div class="form-group"><label>Entrega</label>
+            <div class="form-group"><label>Estado de sesión</label>
               <select class="form-input" name="estado_entrega">
                 <option value="pendiente">Pendiente</option>
                 <option value="en_edicion">En edición</option>
@@ -648,11 +771,15 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
       </div>
       <div style="overflow-x:auto;">
       <table>
-        <thead><tr><th>Cliente</th><th>Servicio</th><th>Fecha</th><th>Total / Saldo</th><th>Pago</th><th>Entrega</th><th>Acciones</th></tr></thead>
+        <thead><tr><th>Cliente</th><th>Servicio</th><th>Fecha</th><th>Total / Saldo</th><th>Pago</th><th>Estado de sesión</th><th>Acciones</th></tr></thead>
         <tbody>
           <?php if($listadoSesiones->num_rows===0): ?>
             <tr><td colspan="7" class="empty-row">No hay sesiones con ese filtro.</td></tr>
-          <?php else: $i=0; while($s=$listadoSesiones->fetch_assoc()): ?>
+          <?php else: $i=0; while($s=$listadoSesiones->fetch_assoc()):
+            $sid = (int)$s['id'];
+            $s['adicionales'] = $adicionalesPorSesion[$sid] ?? [];
+            $s['servicios_ids'] = array_map(function($a){ return (int)$a['producto_id']; }, $s['adicionales']);
+          ?>
           <tr>
             <td>
               <div class="client-cell">
@@ -671,7 +798,7 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
             <td>
               <div style="display:flex;gap:5px;flex-wrap:wrap;">
                 <button class="btn btn-teal btn-sm" onclick="abrirGaleria(<?= $s['id'] ?>,'<?= htmlspecialchars($s['nombre'].' '.$s['apellido']) ?>')">📷</button>
-                <button class="btn btn-ghost btn-sm" onclick="editarSesion(<?= htmlspecialchars(json_encode($s)) ?>)">Editar</button>
+                <button class="btn btn-ghost btn-sm" onclick="editarSesionPorId(<?= (int)$s['id'] ?>)">Editar</button>
                 <button class="btn btn-danger btn-sm" onclick="confirmarEliminar(<?= $s['id'] ?>,'<?= htmlspecialchars($s['nombre'].' '.$s['apellido']) ?>')">Eliminar</button>
               </div>
             </td>
@@ -717,7 +844,7 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
                 type="text" 
                 id="mClienteSearch" 
                 class="form-input cliente-search-input" 
-                placeholder="Buscar por nombre o apellido..."
+                placeholder="Buscar por nombre o teléfono..."
                 autocomplete="off"
                 oninput="filtrarClientes('mClienteSearch','mClienteDropdown','mClienteIdInput')"
                 onfocus="mostrarDropdown('mClienteDropdown')"
@@ -727,9 +854,9 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
               <?php $todosClientes->data_seek(0); while($cl=$todosClientes->fetch_assoc()): ?>
               <div class="cliente-option" 
                    data-id="<?=$cl['id']?>" 
-                   data-nombre="<?=htmlspecialchars($cl['nombre'].' '.$cl['apellido'])?>"
+                   data-nombre="<?=htmlspecialchars($cl['nombre'])?>" data-telefono="<?=htmlspecialchars($cl['telefono']??'')?>"
                    onclick="seleccionarCliente(this,'mClienteSearch','mClienteDropdown','mClienteIdInput')">
-                <?=htmlspecialchars($cl['nombre'].' '.$cl['apellido'])?>
+                <?=htmlspecialchars($cl['nombre'])?>
               </div>
               <?php endwhile; ?>
             </div>
@@ -743,41 +870,45 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
           <input class="form-input" type="date" name="fecha_sesion" id="mFecha" required>
         </div>
 
-        <!-- Servicios con opción de agregar más -->
+        <!-- Tipo de sesión y adicionales -->
         <div class="form-group">
-          <label>Servicio(s)</label>
-          <div id="mServiciosLista" class="servicios-lista">
-            <div class="servicio-item" id="mServItem0">
-              <select class="form-input" name="producto_id[]" id="mProducto0" style="border:none;background:transparent;padding:0;" onchange="autoTotalModal()">
-                <option value="">— Sin servicio —</option>
-                <?php $todosProductos->data_seek(0); while($pr=$todosProductos->fetch_assoc()): ?>
-                <option value="<?=$pr['id']?>" data-precio="<?=$pr['precio']?>"><?=htmlspecialchars($pr['nombre'])?> — <?=formatoPeso($pr['precio'])?></option>
-                <?php endwhile; ?>
-              </select>
-            </div>
+          <label>Tipo de sesión *</label>
+          <div class="producto-picker">
+            <input type="text" id="mSesionSearch" class="form-input" placeholder="Buscar sesión por nombre..." autocomplete="off" oninput="filtrarProductos('mSesionSearch','mSesionCategoria','mSesionDropdown','sesion')" onfocus="mostrarProductoDropdown('mSesionDropdown','mSesionSearch','sesion')">
+            <select id="mSesionCategoria" class="form-input producto-categoria" onchange="filtrarProductos('mSesionSearch','mSesionCategoria','mSesionDropdown','sesion')">
+              <option value="">Todas las categorías</option>
+            </select>
+            <div class="producto-dropdown" id="mSesionDropdown"></div>
+            <input type="hidden" name="producto_principal_id" id="mSesionIdInput" required>
+            <div class="producto-seleccionado" id="mSesionSeleccionado" style="display:none;"></div>
           </div>
-          <div class="add-servicio-row" onclick="agregarServicioModal()">
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" width="14" height="14"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-            ¿Agregar otro servicio?
+        </div>
+
+        <div class="form-group">
+          <label>Adicionales</label>
+          <div class="producto-picker">
+            <input type="text" id="mAdicionalSearch" class="form-input" placeholder="Buscar adicional por nombre..." autocomplete="off" oninput="filtrarProductos('mAdicionalSearch','mAdicionalCategoria','mAdicionalDropdown','adicional')">
+            <select id="mAdicionalCategoria" class="form-input producto-categoria" onchange="filtrarProductos('mAdicionalSearch','mAdicionalCategoria','mAdicionalDropdown','adicional')">
+              <option value="">Todas las categorías</option>
+            </select>
+            <div class="producto-dropdown" id="mAdicionalDropdown"></div>
           </div>
+          <div id="mAdicionalesLista" class="adicionales-lista"></div>
         </div>
 
         <hr class="divider">
 
         <!-- Total y Abono -->
         <div class="form-row">
-          <div class="form-group"><label>Total ($)</label><input class="form-input" type="number" name="total" id="mTotal" min="0" step="1000" placeholder="0"></div>
+          <div class="form-group"><label>Total ($)</label><input class="form-input" type="number" name="total" id="mTotal" min="0" step="1000" placeholder="0" readonly></div>
           <div class="form-group"><label>Abono ($)</label><input class="form-input" type="number" name="abono" id="mAbono" min="0" step="1000" placeholder="0"></div>
         </div>
 
         <!-- Estado pago y Método -->
         <div class="form-row">
           <div class="form-group"><label>Estado pago</label>
-            <select class="form-input" name="estado_pago" id="mEstadoPago">
-              <option value="pendiente">Pendiente</option>
-              <option value="abonado">Abonado</option>
-              <option value="pagado">Pagado</option>
-            </select>
+            <input class="form-input" id="mEstadoPagoVista" value="Pendiente" readonly>
+            <input type="hidden" name="estado_pago" id="mEstadoPago" value="pendiente">
           </div>
           <div class="form-group"><label>Método pago</label>
             <select class="form-input" name="metodo_pago" id="mMetodoPago">
@@ -791,7 +922,7 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
         </div>
 
         <!-- Entrega -->
-        <div class="form-group"><label>Entrega</label>
+        <div class="form-group"><label>Estado de sesión</label>
           <select class="form-input" name="estado_entrega" id="mEstadoEntrega">
             <option value="pendiente">Pendiente</option>
             <option value="en_edicion">En edición</option>
@@ -867,66 +998,168 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
 const productosData = <?php
   $todosProductos->data_seek(0); $prods=[];
   while($pr=$todosProductos->fetch_assoc()) $prods[]=$pr;
-  echo json_encode($prods);
+  echo json_encode($prods, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 ?>;
+const sesionesData = <?php echo json_encode($sesionesParaJS, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
 const UPLOAD_URL = '<?= UPLOAD_URL ?>';
 
 // ── Buscador de clientes ──
 function filtrarClientes(inputId, dropdownId, hiddenId){
-  const q=document.getElementById(inputId).value.toLowerCase();
+  const q=document.getElementById(inputId).value.toLowerCase().trim();
   const dropdown=document.getElementById(dropdownId);
   const options=dropdown.querySelectorAll('.cliente-option');
   let hay=false;
   options.forEach(op=>{
-    const nombre=op.dataset.nombre.toLowerCase();
-    if(nombre.includes(q)){op.classList.remove('hidden');hay=true;}
-    else op.classList.add('hidden');
+    const nombre=(op.dataset.nombre||'').toLowerCase();
+    const telefono=(op.dataset.telefono||'').toLowerCase();
+    const ok=nombre.includes(q)||telefono.includes(q);
+    op.classList.toggle('hidden', !ok);
+    if(ok) hay=true;
   });
   dropdown.classList.toggle('open', hay||q==='');
   if(q==='') document.getElementById(hiddenId).value='';
 }
-function mostrarDropdown(dropdownId){
-  document.getElementById(dropdownId).classList.add('open');
-}
-function seleccionarCliente(el, inputId, dropdownId, hiddenId){
+function mostrarDropdown(dropdownId){ document.getElementById(dropdownId).classList.add('open'); }
+function seleccionarCliente(el,inputId,dropdownId,hiddenId){
   document.getElementById(inputId).value=el.dataset.nombre;
   document.getElementById(hiddenId).value=el.dataset.id;
   document.getElementById(dropdownId).classList.remove('open');
 }
 document.addEventListener('click',function(e){
   document.querySelectorAll('.cliente-search-wrapper').forEach(wrapper=>{
-    if(!wrapper.contains(e.target))
-      wrapper.querySelector('.cliente-dropdown')?.classList.remove('open');
+    if(!wrapper.contains(e.target)) wrapper.querySelector('.cliente-dropdown')?.classList.remove('open');
+  });
+  document.querySelectorAll('.producto-picker').forEach(wrapper=>{
+    if(!wrapper.contains(e.target)) wrapper.querySelector('.producto-dropdown')?.classList.remove('open');
   });
 });
 
-// ── Modal editar ──
-function cerrarModal(){ document.getElementById('modalSesion').classList.remove('open'); }
-
-function resetModalServicios(){
-  // Eliminar filas extra del modal, dejar solo mServItem0
-  document.querySelectorAll('#mServiciosLista .servicio-item').forEach((el,i)=>{
-    if(i>0) el.remove();
+// ── Productos: sesiones y adicionales ──
+function tipoProductoEsSesion(p){ return ['sesion','combo'].includes(String(p.tipo||'').toLowerCase()); }
+function tipoProductoEsAdicional(p){ return ['adicional','producto'].includes(String(p.tipo||'').toLowerCase()); }
+function formatoPrecio(v){ return '$'+Number(v||0).toLocaleString('es-CO'); }
+function categoriasPorTipo(tipo){
+  const set=new Set();
+  productosData.forEach(p=>{
+    const ok=tipo==='sesion' ? tipoProductoEsSesion(p) : tipoProductoEsAdicional(p);
+    if(ok && p.categoria) set.add(p.categoria);
   });
-  document.getElementById('mProducto0').value='';
+  return Array.from(set).sort((a,b)=>a.localeCompare(b,'es'));
+}
+function cargarCategorias(selectId,tipo){
+  const sel=document.getElementById(selectId); if(!sel) return;
+  const actual=sel.value;
+  sel.innerHTML='<option value="">Todas las categorías</option>';
+  categoriasPorTipo(tipo).forEach(cat=>{
+    const o=document.createElement('option'); o.value=cat; o.textContent=cat; sel.appendChild(o);
+  });
+  if(categoriasPorTipo(tipo).includes(actual)) sel.value=actual;
+}
+function inicializarCategorias(){
+  cargarCategorias('qSesionCategoria','sesion');
+  cargarCategorias('qAdicionalCategoria','adicional');
+  cargarCategorias('mSesionCategoria','sesion');
+  cargarCategorias('mAdicionalCategoria','adicional');
+}
+function productosFiltrados(inputId,categoriaId,tipo){
+  const q=(document.getElementById(inputId)?.value||'').toLowerCase().trim();
+  const cat=document.getElementById(categoriaId)?.value||'';
+  return productosData.filter(p=>{
+    const esTipo=tipo==='sesion' ? tipoProductoEsSesion(p) : tipoProductoEsAdicional(p);
+    const nombre=String(p.nombre||'').toLowerCase();
+    const categoria=String(p.categoria||'');
+    return esTipo && (!q || nombre.includes(q)) && (!cat || categoria===cat);
+  });
+}
+function mostrarProductoDropdown(dropdownId,inputId,tipo){
+  filtrarProductos(inputId, inputId.replace('Search','Categoria'), dropdownId, tipo);
+}
+function filtrarProductos(inputId,categoriaId,dropdownId,tipo){
+  const dd=document.getElementById(dropdownId); if(!dd) return;
+  const items=productosFiltrados(inputId,categoriaId,tipo);
+  if(!items.length){ dd.innerHTML='<div class="producto-empty">No hay resultados.</div>'; dd.classList.add('open'); return; }
+  dd.innerHTML=items.map(p=>`<div class="producto-option" onclick="seleccionarProducto('${tipo}','${p.id}')"><div><strong>${escapeHtml(p.nombre)}</strong><small>${escapeHtml(p.categoria||'Sin categoría')}</small></div><span>${formatoPrecio(p.precio)}</span></div>`).join('');
+  dd.classList.add('open');
+}
+function escapeHtml(value){ return String(value??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','\'':'&#39;','"':'&quot;'}[c])); }
+function buscarProducto(id){ return productosData.find(p=>Number(p.id)===Number(id)); }
+function seleccionarProducto(tipo,id){
+  const p=buscarProducto(id); if(!p) return;
+  if(tipo==='sesion'){
+    const prefix=document.getElementById('mSesionSearch') ? (document.getElementById('mSesionSearch').closest('.modal-overlay')?.classList.contains('open')?'m':'q') : 'q';
+    const inputId=prefix==='m'?'mSesionSearch':'qSesionSearch';
+    const hiddenId=prefix==='m'?'mSesionIdInput':'qSesionIdInput';
+    const ddId=prefix==='m'?'mSesionDropdown':'qSesionDropdown';
+    const selectedId=prefix==='m'?'mSesionSeleccionado':'qSesionSeleccionado';
+    document.getElementById(inputId).value=p.nombre;
+    document.getElementById(hiddenId).value=p.id;
+    document.getElementById(selectedId).style.display='flex';
+    document.getElementById(selectedId).innerHTML=`<span>${escapeHtml(p.nombre)}</span><b>${formatoPrecio(p.precio)}</b><button type="button" onclick="event.stopPropagation();limpiarSesion('${prefix}')">×</button>`;
+    document.getElementById(ddId).classList.remove('open');
+    if(prefix==='m') autoTotalModal(); else autoTotal();
+  }else{
+    const prefix=document.getElementById('mAdicionalSearch') && document.getElementById('mAdicionalSearch').closest('.modal-overlay')?.classList.contains('open')?'m':'q';
+    agregarAdicional(prefix,p.id);
+    document.getElementById(prefix==='m'?'mAdicionalDropdown':'qAdicionalDropdown').classList.remove('open');
+    document.getElementById(prefix==='m'?'mAdicionalSearch':'qAdicionalSearch').value='';
+  }
+}
+function limpiarSesion(prefix){
+  const input=prefix==='m'?'mSesionSearch':'qSesionSearch';
+  const hidden=prefix==='m'?'mSesionIdInput':'qSesionIdInput';
+  const selected=prefix==='m'?'mSesionSeleccionado':'qSesionSeleccionado';
+  document.getElementById(input).value=''; document.getElementById(hidden).value=''; document.getElementById(selected).style.display='none';
+  prefix==='m'?autoTotalModal():autoTotal();
 }
 
+function agregarAdicional(prefix,id,cantidad=1){
+  const lista=document.getElementById(prefix==='m'?'mAdicionalesLista':'qAdicionalesLista');
+  const existing=lista.querySelector(`.adicional-item[data-id="${id}"]`);
+  if(existing){ const qty=existing.querySelector('.adicional-cantidad'); qty.value=parseInt(qty.value||1)+cantidad; prefix==='m'?autoTotalModal():autoTotal(); return; }
+  const p=buscarProducto(id); if(!p) return;
+  const item=document.createElement('div');
+  item.className='adicional-item'; item.dataset.id=id;
+  item.innerHTML=`<input type="hidden" name="adicional_id[]" value="${p.id}"><div class="adicional-info"><strong>${escapeHtml(p.nombre)}</strong><small>${escapeHtml(p.categoria||'Sin categoría')} · ${formatoPrecio(p.precio)}</small></div><input class="form-input adicional-cantidad" type="number" name="adicional_cantidad[]" min="1" step="1" value="${cantidad}" onchange="${prefix==='m'?'autoTotalModal()':'autoTotal()'}"><button type="button" class="btn-remove-serv" onclick="this.closest('.adicional-item').remove();${prefix==='m'?'autoTotalModal()':'autoTotal()'}">✕</button>`;
+  lista.appendChild(item);
+  prefix==='m'?autoTotalModal():autoTotal();
+}
+function limpiarAdicionales(prefix){ document.getElementById(prefix==='m'?'mAdicionalesLista':'qAdicionalesLista').innerHTML=''; }
+
+// ── Modal editar: se conserva y ahora recibe ID desde calendario/listado ──
+function cerrarModal(){ document.getElementById('modalSesion').classList.remove('open'); }
+function resetModalProductos(){
+  document.getElementById('mSesionSearch').value='';
+  document.getElementById('mSesionIdInput').value='';
+  document.getElementById('mSesionSeleccionado').style.display='none';
+  document.getElementById('mAdicionalesLista').innerHTML='';
+}
 function editarSesion(s){
   document.getElementById('mTitulo').textContent='Editar Sesión';
   document.getElementById('mId').value=s.id;
-  // Buscador cliente: poner el nombre en el input y el id en el hidden
-  document.getElementById('mClienteSearch').value=(s.nombre||'')+' '+(s.apellido||'');
+  document.getElementById('mClienteSearch').value=(s.nombre||'');
   document.getElementById('mClienteIdInput').value=s.cliente_id;
   document.getElementById('mFecha').value=s.fecha_sesion;
-  document.getElementById('mTotal').value=s.total;
   document.getElementById('mAbono').value=s.abono;
-  document.getElementById('mEstadoPago').value=s.estado_pago;
-  document.getElementById('mEstadoEntrega').value=s.estado_entrega;
+  document.getElementById('mEstadoEntrega').value=s.estado_entrega||'pendiente';
   document.getElementById('mMetodoPago').value=s.metodo_pago||'efectivo';
   document.getElementById('mNotas').value=s.notas||'';
-  resetModalServicios();
-  if(s.producto_id) document.getElementById('mProducto0').value=s.producto_id;
+  resetModalProductos();
+
+  const principal=buscarProducto(s.producto_id);
+  if(principal){
+    document.getElementById('mSesionSearch').value=principal.nombre;
+    document.getElementById('mSesionIdInput').value=principal.id;
+    document.getElementById('mSesionSeleccionado').style.display='flex';
+    document.getElementById('mSesionSeleccionado').innerHTML=`<span>${escapeHtml(principal.nombre)}</span><b>${formatoPrecio(principal.precio)}</b><button type="button" onclick="event.stopPropagation();limpiarSesion('m')">×</button>`;
+  }
+  (s.adicionales||[]).forEach(a=>agregarAdicional('m',a.producto_id,a.cantidad||1));
+  autoTotalModal();
+  actualizarEstadoPago('m');
   document.getElementById('modalSesion').classList.add('open');
+}
+function editarSesionPorId(id){
+  const s=sesionesData.find(x=>Number(x.id)===Number(id));
+  if(s) editarSesion(s);
 }
 function confirmarEliminar(id,nombre){
   if(confirm('¿Eliminar sesión de '+nombre+'?')){
@@ -935,73 +1168,41 @@ function confirmarEliminar(id,nombre){
   }
 }
 document.getElementById('modalSesion').addEventListener('click',function(e){if(e.target===this)cerrarModal();});
-  // ── Auto-rellenar abono=total cuando cambia a "pagado" ──
-document.getElementById('mEstadoPago').addEventListener('change', function(){
-  if(this.value === 'pagado'){
-    const total = parseFloat(document.getElementById('mTotal').value) || 0;
-    if(total > 0){
-      document.getElementById('mAbono').value = total;
-    }
-  }
-});
 
-document.getElementById('qEstadoPago').addEventListener('change', function(){
-  if(this.value === 'pagado'){
-    const total = parseFloat(document.getElementById('qTotal').value) || 0;
-    if(total > 0){
-      document.getElementById('qAbono').value = total;
-    }
-  }
-});
-
-// ── Servicios adicionales – formulario nueva sesión ──
-let servicioCount=1;
-function buildOptions(){
-  let html='<option value="">— Sin servicio —</option>';
-  productosData.forEach(p=>{
-    html+=`<option value="${p.id}" data-precio="${p.precio}">${p.nombre} — $${Number(p.precio).toLocaleString('es-CO')}</option>`;
-  });
-  return html;
-}
-function agregarServicio(){
-  const lista=document.getElementById('serviciosLista');
-  const idx=servicioCount++;
-  const color=idx%2===0?'':'teal-item';
-  const div=document.createElement('div');
-  div.className='servicio-item '+color;
-  div.id='servItem'+idx;
-  div.innerHTML=`<select class="form-input" name="producto_id[]" style="border:none;background:transparent;padding:0;" onchange="autoTotal()">${buildOptions()}</select><button type="button" class="btn-remove-serv" onclick="document.getElementById('servItem${idx}').remove();autoTotal()">✕</button>`;
-  lista.appendChild(div);
-}
 function autoTotal(){
-  let suma=0;
-  document.querySelectorAll('#serviciosLista select').forEach(sel=>{
-    const p=parseFloat(sel.options[sel.selectedIndex]?.getAttribute('data-precio')||0);
-    suma+=p;
+  const principal=buscarProducto(document.getElementById('qSesionIdInput').value);
+  let suma=principal?Number(principal.precio):0;
+  document.querySelectorAll('#qAdicionalesLista .adicional-item').forEach(item=>{
+    const p=buscarProducto(item.dataset.id); const qty=parseInt(item.querySelector('.adicional-cantidad').value||1);
+    if(p) suma+=Number(p.precio)*qty;
   });
-  if(suma>0) document.getElementById('qTotal').value=suma;
-}
-
-// ── Servicios adicionales – modal ──
-let mServicioCount=1;
-function agregarServicioModal(){
-  const lista=document.getElementById('mServiciosLista');
-  const idx=mServicioCount++;
-  const color=idx%2===0?'':'teal-item';
-  const div=document.createElement('div');
-  div.className='servicio-item '+color;
-  div.id='mServItem'+idx;
-  div.innerHTML=`<select class="form-input" name="producto_id[]" style="border:none;background:transparent;padding:0;" onchange="autoTotalModal()">${buildOptions()}</select><button type="button" class="btn-remove-serv" onclick="document.getElementById('mServItem${idx}').remove();autoTotalModal()">✕</button>`;
-  lista.appendChild(div);
+  document.getElementById('qTotal').value=Math.round(suma);
+  actualizarEstadoPago('q');
 }
 function autoTotalModal(){
-  let suma=0;
-  document.querySelectorAll('#mServiciosLista select').forEach(sel=>{
-    const p=parseFloat(sel.options[sel.selectedIndex]?.getAttribute('data-precio')||0);
-    suma+=p;
+  const principal=buscarProducto(document.getElementById('mSesionIdInput').value);
+  let suma=principal?Number(principal.precio):0;
+  document.querySelectorAll('#mAdicionalesLista .adicional-item').forEach(item=>{
+    const p=buscarProducto(item.dataset.id); const qty=parseInt(item.querySelector('.adicional-cantidad').value||1);
+    if(p) suma+=Number(p.precio)*qty;
   });
-  if(suma>0) document.getElementById('mTotal').value=suma;
+  document.getElementById('mTotal').value=Math.round(suma);
+  actualizarEstadoPago('m');
 }
+function actualizarEstadoPago(prefix){
+  const total=Number(document.getElementById(prefix==='m'?'mTotal':'qTotal').value)||0;
+  const abonoEl=document.getElementById(prefix==='m'?'mAbono':'qAbono');
+  let abono=Number(abonoEl.value)||0;
+  if(abono>total){ abono=total; abonoEl.value=total; }
+  const estado=total>0 && abono>=total?'pagado':abono>0?'abonado':'pendiente';
+  document.getElementById(prefix==='m'?'mEstadoPago':'qEstadoPago').value=estado;
+  document.getElementById(prefix==='m'?'mEstadoPagoVista':'qEstadoPagoVista').value=estado.charAt(0).toUpperCase()+estado.slice(1);
+}
+
+document.getElementById('mAbono').addEventListener('input',()=>actualizarEstadoPago('m'));
+document.getElementById('qAbono').addEventListener('input',()=>actualizarEstadoPago('q'));
+
+inicializarCategorias();
 
 // ── Galería ──
 function abrirGaleria(sesionId, nombre){

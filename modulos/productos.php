@@ -18,19 +18,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $descripcion = sanitize($_POST['descripcion'] ?? '');
         $precio      = floatval($_POST['precio'] ?? 0);
         $tipo        = sanitize($_POST['tipo'] ?? 'sesion');
+        $categoria  = sanitize($_POST['categoria'] ?? '');
         $estado      = sanitize($_POST['estado'] ?? 'activo');
+        if (!in_array($tipo, ['sesion','combo','adicional'], true)) $tipo = 'adicional';
 
+        // Las sesiones y los adicionales deben pertenecer a una categoría.
         if (empty($nombre) || $precio <= 0) {
             $error = 'El nombre y precio son obligatorios.';
+        } elseif (in_array($tipo, ['sesion','adicional'], true) && $categoria === '') {
+            $error = 'Debes asignar una categoría a la sesión o adicional.';
         } else {
             if ($id > 0) {
-                $stmt = $db->prepare("UPDATE productos SET nombre=?, descripcion=?, precio=?, tipo=?, estado=? WHERE id=?");
-                $stmt->bind_param("ssdssi", $nombre, $descripcion, $precio, $tipo, $estado, $id);
-                $mensaje = 'Producto actualizado correctamente.';
+                $stmt = $db->prepare("UPDATE productos SET nombre=?, descripcion=?, precio=?, tipo=?, categoria=?, estado=? WHERE id=?");
+                $stmt->bind_param("ssdsssi", $nombre, $descripcion, $precio, $tipo, $categoria, $estado, $id);
+                $mensaje = 'Elemento actualizado correctamente.';
             } else {
-                $stmt = $db->prepare("INSERT INTO productos (nombre, descripcion, precio, tipo, estado) VALUES (?,?,?,?,?)");
-                $stmt->bind_param("ssdss", $nombre, $descripcion, $precio, $tipo, $estado);
-                $mensaje = 'Producto creado correctamente.';
+                $stmt = $db->prepare("INSERT INTO productos (nombre, descripcion, precio, tipo, categoria, estado) VALUES (?,?,?,?,?,?)");
+                $stmt->bind_param("ssdsss", $nombre, $descripcion, $precio, $tipo, $categoria, $estado);
+                $mensaje = 'Elemento creado correctamente.';
             }
             $stmt->execute();
             $stmt->close();
@@ -44,7 +49,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmt->bind_param("i", $id);
             $stmt->execute();
             $stmt->close();
-            $mensaje = 'Producto eliminado.';
+            $mensaje = 'Elemento eliminado.';
         }
     }
 
@@ -65,6 +70,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 // ============================================
 $filtroTipo   = sanitize($_GET['tipo'] ?? '');
 $filtroEstado = sanitize($_GET['estado'] ?? 'activo');
+$filtroCategoria = sanitize($_GET['categoria'] ?? '');
 
 $where  = "WHERE 1=1";
 $params = [];
@@ -78,6 +84,11 @@ if ($filtroTipo) {
 if ($filtroEstado) {
     $where   .= " AND estado = ?";
     $params[] = $filtroEstado;
+    $tipos   .= 's';
+}
+if ($filtroCategoria) {
+    $where   .= " AND categoria = ?";
+    $params[] = $filtroCategoria;
     $tipos   .= 's';
 }
 
@@ -97,15 +108,60 @@ $totalActivos  = $db->query("SELECT COUNT(*) as t FROM productos WHERE estado='a
 $totalProductos = $db->query("SELECT COUNT(*) as t FROM productos")->fetch_assoc()['t'];
 $precioPromedio = $db->query("SELECT AVG(precio) as t FROM productos WHERE estado='activo'")->fetch_assoc()['t'];
 
-$tiposLabel = ['sesion' => 'Sesión', 'combo' => 'Combo', 'producto' => 'Producto', 'adicional' => 'Adicional'];
-$tiposColor = ['sesion' => 'rose', 'combo' => 'teal', 'producto' => 'lavender', 'adicional' => 'orange'];
+// Categorías existentes, separadas por tipo para sugerirlas al crear/editar.
+// Cada tipo mantiene sus propias categorías: Sesiones, Combos y Adicionales no se mezclan.
+$categoriasPorTipo = ['sesion' => [], 'combo' => [], 'adicional' => []];
+$rCategorias = $db->query("SELECT tipo, categoria FROM productos WHERE categoria IS NOT NULL AND TRIM(categoria) <> '' GROUP BY tipo, categoria ORDER BY categoria ASC");
+while ($cat = $rCategorias->fetch_assoc()) {
+    if (isset($categoriasPorTipo[$cat['tipo']])) {
+        $categoriasPorTipo[$cat['tipo']][] = $cat['categoria'];
+    }
+}
+
+// Categorías del filtro. Se obtienen según el apartado que realmente se está viendo.
+// Así, por ejemplo, en ADICIONALES solo aparecen categorías de productos tipo adicional.
+$categoriasFiltro = [];
+$whereCategorias = [];
+$paramsCategorias = [];
+$tiposCategorias = "";
+
+if ($filtroTipo) {
+    $whereCategorias[] = "tipo = ?";
+    $paramsCategorias[] = $filtroTipo;
+    $tiposCategorias .= "s";
+}
+if ($filtroEstado) {
+    $whereCategorias[] = "estado = ?";
+    $paramsCategorias[] = $filtroEstado;
+    $tiposCategorias .= "s";
+}
+
+$sqlCategoriasFiltro = "SELECT DISTINCT categoria FROM productos WHERE categoria IS NOT NULL AND TRIM(categoria) <> ''";
+if ($whereCategorias) {
+    $sqlCategoriasFiltro .= " AND " . implode(" AND ", $whereCategorias);
+}
+$sqlCategoriasFiltro .= " ORDER BY categoria ASC";
+
+$stmtCategorias = $db->prepare($sqlCategoriasFiltro);
+if ($paramsCategorias) {
+    $stmtCategorias->bind_param($tiposCategorias, ...$paramsCategorias);
+}
+$stmtCategorias->execute();
+$rCategoriasFiltro = $stmtCategorias->get_result();
+while ($cat = $rCategoriasFiltro->fetch_assoc()) {
+    $categoriasFiltro[] = $cat['categoria'];
+}
+$stmtCategorias->close();
+
+$tiposLabel = ['sesion' => 'Sesión', 'combo' => 'Combo', 'adicional' => 'Adicional'];
+$tiposColor = ['sesion' => 'rose', 'combo' => 'teal', 'adicional' => 'orange'];
 ?>
 <!DOCTYPE html>
 <html lang="es">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Productos – <?= SITE_NAME ?></title>
+<title>Catálogo – <?= SITE_NAME ?></title>
 <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@400;600;700&family=Nunito:wght@300;400;600;700&display=swap" rel="stylesheet">
 <style>
   :root{--bg:#faf8f6;--surface:#fff;--surface2:#fdf5f8;--navy:#1a1f3c;--navy-mid:#2d3460;--navy-soft:#e8eaf6;--rose:#e8789a;--rose-light:#f5b8ce;--rose-pale:#fce8f0;--rose-deep:#c4547a;--teal:#5bbcb8;--teal-light:#9ddbd8;--teal-pale:#e0f5f4;--teal-deep:#3a9994;--lavender:#9e8bc9;--lav-light:#c5b8e8;--lav-pale:#f0ecfb;--text:#2a2040;--text-mid:#6b5e7a;--text-dim:#a899b5;--border:#ede0ea;--sidebar-w:230px;--shadow-sm:0 2px 8px rgba(180,120,160,0.10);--shadow-md:0 4px 20px rgba(180,120,160,0.15);}
@@ -212,10 +268,18 @@ $tiposColor = ['sesion' => 'rose', 'combo' => 'teal', 'producto' => 'lavender', 
   label{font-size:10px;letter-spacing:0.1em;text-transform:uppercase;color:var(--text-dim);font-weight:700;}
   .form-input{background:var(--surface2);border:1.5px solid var(--border);border-radius:10px;padding:9px 13px;color:var(--navy);font-family:'Nunito',sans-serif;font-size:12.5px;font-weight:600;outline:none;transition:border-color 0.2s;width:100%;}
   .form-input:focus{border-color:var(--rose-light);box-shadow:0 0 0 3px rgba(232,120,154,0.10);}
+  .categoria-select{cursor:pointer;appearance:auto;}
+  .categoria-nueva{display:none;margin-top:7px;}
+  .categoria-nueva.visible{display:block;}
+  .categoria-hint{font-size:10px;color:var(--text-dim);line-height:1.4;}
+  .categoria-filtro{display:flex;align-items:center;gap:7px;margin-top:10px;}
+  .categoria-filtro label{font-size:10px;color:var(--text-dim);font-weight:700;text-transform:uppercase;letter-spacing:.08em;}
+  .categoria-filtro select{min-width:190px;padding:7px 12px;border:1.5px solid var(--border);border-radius:10px;background:var(--surface);color:var(--text-mid);font:600 11px 'Nunito',sans-serif;outline:none;cursor:pointer;}
+  .categoria-filtro select:focus{border-color:var(--rose-light);box-shadow:0 0 0 3px rgba(232,120,154,0.10);}
   textarea.form-input{resize:vertical;min-height:70px;}
 
   /* TIPO SELECTOR */
-  .tipo-selector{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;}
+  .tipo-selector{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;}
   .tipo-opt{display:none;}
   .tipo-opt + label{display:flex;flex-direction:column;align-items:center;padding:10px 6px;border-radius:10px;border:1.5px solid var(--border);cursor:pointer;font-size:10px;font-weight:700;color:var(--text-dim);text-transform:uppercase;letter-spacing:0.06em;text-align:center;transition:all 0.18s;gap:4px;}
   .tipo-opt + label span{font-size:18px;}
@@ -238,11 +302,11 @@ $tiposColor = ['sesion' => 'rose', 'combo' => 'teal', 'producto' => 'lavender', 
 <!-- MAIN -->
 <div class="main">
   <div class="topbar">
-    <span class="page-title">Productos & Combos</span>
+    <span class="page-title">Sesiones, Combos y Adicionales</span>
     <div class="topbar-sep"></div>
     <button class="btn btn-primary" onclick="abrirModal()">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-      Nuevo Producto
+      Nuevo elemento
     </button>
   </div>
 
@@ -277,11 +341,21 @@ $tiposColor = ['sesion' => 'rose', 'combo' => 'teal', 'producto' => 'lavender', 
         <a href="productos.php" class="filtro-btn <?= !$filtroTipo && $filtroEstado==='activo' ? 'active' : '' ?>">Todos</a>
         <a href="?tipo=sesion" class="filtro-btn <?= $filtroTipo==='sesion' ? 'active' : '' ?>">📷 Sesiones</a>
         <a href="?tipo=combo" class="filtro-btn <?= $filtroTipo==='combo' ? 'active' : '' ?>">🎁 Combos</a>
-        <a href="?tipo=producto" class="filtro-btn <?= $filtroTipo==='producto' ? 'active' : '' ?>">📦 Productos</a>
         <a href="?tipo=adicional" class="filtro-btn <?= $filtroTipo==='adicional' ? 'active' : '' ?>">➕ Adicionales</a>
         <div class="filtro-sep"></div>
         <a href="?estado=inactivo" class="filtro-btn <?= $filtroEstado==='inactivo' ? 'active' : '' ?>">Inactivos</a>
       </div>
+      <form method="GET" class="categoria-filtro">
+        <?php if ($filtroTipo): ?><input type="hidden" name="tipo" value="<?= htmlspecialchars($filtroTipo) ?>"><?php endif; ?>
+        <input type="hidden" name="estado" value="<?= htmlspecialchars($filtroEstado) ?>">
+        <label for="filtroCategoria">Categoría</label>
+        <select id="filtroCategoria" name="categoria" onchange="this.form.submit()">
+          <option value="">Todas las categorías</option>
+          <?php foreach ($categoriasFiltro as $cat): ?>
+            <option value="<?= htmlspecialchars($cat) ?>" <?= $filtroCategoria === $cat ? 'selected' : '' ?>><?= htmlspecialchars($cat) ?></option>
+          <?php endforeach; ?>
+        </select>
+      </form>
       <span style="font-size:11px;color:var(--text-dim);font-weight:600;margin-left:auto;"><?= $productos->num_rows ?> resultado<?= $productos->num_rows !== 1 ? 's' : '' ?></span>
     </div>
 
@@ -289,8 +363,8 @@ $tiposColor = ['sesion' => 'rose', 'combo' => 'teal', 'producto' => 'lavender', 
     <?php if ($productos->num_rows === 0): ?>
       <div class="empty-state">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
-        <div style="font-size:14px;font-weight:700;color:var(--text-mid);margin-bottom:4px;">Sin productos</div>
-        <div style="font-size:12px;">Crea tu primer producto o combo para comenzar.</div>
+        <div style="font-size:14px;font-weight:700;color:var(--text-mid);margin-bottom:4px;">Sin elementos</div>
+        <div style="font-size:12px;">Crea tu primer elemento para comenzar.</div>
       </div>
     <?php else: ?>
     <div class="productos-grid">
@@ -303,6 +377,7 @@ $tiposColor = ['sesion' => 'rose', 'combo' => 'teal', 'producto' => 'lavender', 
           <div class="pc-tipo-badge <?= $colorCls ?>"><?= $tipoLabel ?></div>
           <div class="pc-nombre"><?= htmlspecialchars($p['nombre']) ?></div>
           <div class="pc-descripcion"><?= htmlspecialchars($p['descripcion'] ?: 'Sin descripción.') ?></div>
+          <?php if(!empty($p['categoria'])): ?><div style="font-size:10px;color:var(--text-dim);margin-top:6px;font-weight:700;">Categoría: <?= htmlspecialchars($p['categoria']) ?></div><?php endif; ?>
         </div>
         <div class="pc-bottom">
           <div class="pc-precio"><?= formatoPeso($p['precio']) ?></div>
@@ -331,7 +406,7 @@ $tiposColor = ['sesion' => 'rose', 'combo' => 'teal', 'producto' => 'lavender', 
 <div class="modal-overlay" id="modalProducto">
   <div class="modal">
     <div class="modal-header">
-      <div class="modal-title" id="modalTitulo">Nuevo Producto</div>
+      <div class="modal-title" id="modalTitulo">Nuevo elemento</div>
       <button class="modal-close" onclick="cerrarModal()">✕</button>
     </div>
     <form method="POST" action="">
@@ -345,10 +420,8 @@ $tiposColor = ['sesion' => 'rose', 'combo' => 'teal', 'producto' => 'lavender', 
             <label for="t1"><span>📷</span>Sesión</label>
             <input type="radio" name="tipo" id="t2" value="combo" class="tipo-opt">
             <label for="t2"><span>🎁</span>Combo</label>
-            <input type="radio" name="tipo" id="t3" value="producto" class="tipo-opt">
-            <label for="t3"><span>📦</span>Producto</label>
-            <input type="radio" name="tipo" id="t4" value="adicional" class="tipo-opt">
-            <label for="t4"><span>➕</span>Adicional</label>
+            <input type="radio" name="tipo" id="t3" value="adicional" class="tipo-opt">
+            <label for="t3"><span>➕</span>Adicional</label>
           </div>
         </div>
         <div class="form-group">
@@ -358,6 +431,15 @@ $tiposColor = ['sesion' => 'rose', 'combo' => 'teal', 'producto' => 'lavender', 
         <div class="form-group">
           <label>Descripción</label>
           <textarea class="form-input" name="descripcion" id="mDescripcion" placeholder="Qué incluye este servicio..."></textarea>
+        </div>
+        <div class="form-group">
+          <label id="categoriaLabel">Categoría *</label>
+          <select class="form-input categoria-select" id="mCategoriaSelect" onchange="cambiarCategoria()">
+            <option value="">Selecciona una categoría...</option>
+          </select>
+          <input class="form-input categoria-nueva" type="text" id="mCategoriaNueva" placeholder="Escribe la nueva categoría..." autocomplete="off">
+          <input type="hidden" name="categoria" id="mCategoria">
+          <div class="categoria-hint" id="categoriaHint">Selecciona una categoría existente o crea una nueva.</div>
         </div>
         <div class="form-row">
           <div class="form-group">
@@ -388,28 +470,105 @@ $tiposColor = ['sesion' => 'rose', 'combo' => 'teal', 'producto' => 'lavender', 
 </form>
 
 <script>
+function actualizarCategoriaSegunTipo(categoriaActual = '') {
+  const tipo = document.querySelector('input[name="tipo"]:checked')?.value || 'sesion';
+  const select = document.getElementById('mCategoriaSelect');
+  const nueva = document.getElementById('mCategoriaNueva');
+  const hidden = document.getElementById('mCategoria');
+  const label = document.getElementById('categoriaLabel');
+  const hint = document.getElementById('categoriaHint');
+
+  const categorias = <?= json_encode($categoriasPorTipo, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES) ?>;
+  const lista = categorias[tipo] || [];
+
+  select.innerHTML = '<option value="">Selecciona una categoría...</option>';
+  lista.forEach(function(cat) {
+    const option = document.createElement('option');
+    option.value = cat;
+    option.textContent = cat;
+    select.appendChild(option);
+  });
+
+  const nuevaOption = document.createElement('option');
+  nuevaOption.value = '__nueva__';
+  nuevaOption.textContent = '＋ Crear nueva categoría';
+  select.appendChild(nuevaOption);
+
+  label.textContent = (tipo === 'sesion' || tipo === 'adicional') ? 'Categoría *' : 'Categoría';
+  select.required = (tipo === 'sesion' || tipo === 'adicional');
+
+  nueva.value = '';
+  nueva.classList.remove('visible');
+  hidden.value = categoriaActual || '';
+
+  if (categoriaActual && lista.includes(categoriaActual)) {
+    select.value = categoriaActual;
+  } else if (categoriaActual) {
+    select.value = '__nueva__';
+    nueva.value = categoriaActual;
+    nueva.classList.add('visible');
+  } else {
+    select.value = '';
+  }
+
+  hint.textContent = (tipo === 'sesion' || tipo === 'adicional')
+    ? 'Selecciona una categoría existente o crea una nueva.'
+    : 'La categoría es opcional.';
+}
+
+function cambiarCategoria() {
+  const select = document.getElementById('mCategoriaSelect');
+  const nueva = document.getElementById('mCategoriaNueva');
+  const hidden = document.getElementById('mCategoria');
+
+  if (select.value === '__nueva__') {
+    nueva.classList.add('visible');
+    nueva.focus();
+    hidden.value = nueva.value.trim();
+  } else {
+    nueva.classList.remove('visible');
+    hidden.value = select.value;
+  }
+}
+
+document.getElementById('mCategoriaNueva').addEventListener('input', function() {
+  if (document.getElementById('mCategoriaSelect').value === '__nueva__') {
+    document.getElementById('mCategoria').value = this.value.trim();
+  }
+});
+
 function abrirModal() {
-  document.getElementById('modalTitulo').textContent = 'Nuevo Producto';
+  document.getElementById('modalTitulo').textContent = 'Nuevo elemento';
   document.getElementById('productoId').value = '0';
   document.getElementById('mNombre').value = '';
   document.getElementById('mDescripcion').value = '';
+  document.getElementById('mCategoria').value = '';
+  document.getElementById('mCategoriaNueva').value = '';
+  document.getElementById('mCategoriaNueva').classList.remove('visible');
   document.getElementById('mPrecio').value = '';
   document.getElementById('mEstado').value = 'activo';
   document.querySelector('input[name="tipo"][value="sesion"]').checked = true;
+  actualizarCategoriaSegunTipo('');
   document.getElementById('modalProducto').classList.add('open');
 }
 
 function editarProducto(p) {
-  document.getElementById('modalTitulo').textContent = 'Editar Producto';
+  document.getElementById('modalTitulo').textContent = 'Editar elemento';
   document.getElementById('productoId').value    = p.id;
   document.getElementById('mNombre').value       = p.nombre;
   document.getElementById('mDescripcion').value  = p.descripcion || '';
+  document.getElementById('mCategoria').value    = p.categoria || '';
   document.getElementById('mPrecio').value       = p.precio;
   document.getElementById('mEstado').value       = p.estado;
   const radio = document.querySelector('input[name="tipo"][value="' + p.tipo + '"]');
   if (radio) radio.checked = true;
+  actualizarCategoriaSegunTipo(p.categoria || '');
   document.getElementById('modalProducto').classList.add('open');
 }
+
+document.querySelectorAll('input[name="tipo"]').forEach(function(radio) {
+  radio.addEventListener('change', function() { actualizarCategoriaSegunTipo(''); });
+});
 
 function cerrarModal() {
   document.getElementById('modalProducto').classList.remove('open');
