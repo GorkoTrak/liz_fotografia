@@ -22,8 +22,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $direccion= sanitize($_POST['direccion'] ?? '');
         $notas    = sanitize($_POST['notas'] ?? '');
 
-        if (empty($nombre) || empty($apellido)) {
-            $error = 'El nombre y apellido son obligatorios.';
+        if (empty($nombre)) {
+            $error = 'El nombre completo es obligatorio.';
         } else {
             if ($id > 0) {
                 $stmt = $db->prepare("UPDATE clientes SET nombre=?, apellido=?, telefono=?, email=?, direccion=?, notas=? WHERE id=?");
@@ -344,15 +344,9 @@ $avClasses = ['av-a','av-b','av-c','av-d','av-e'];
       <input type="hidden" name="accion" value="guardar">
       <input type="hidden" name="id" id="clienteId" value="0">
       <div class="modal-body">
-        <div class="form-row">
-          <div class="form-group">
-            <label>Nombre *</label>
-            <input class="form-input" type="text" name="nombre" id="fNombre" placeholder="Ej: María" required>
-          </div>
-          <div class="form-group">
-            <label>Apellido *</label>
-            <input class="form-input" type="text" name="apellido" id="fApellido" placeholder="Ej: García" required>
-          </div>
+        <div class="form-group">
+          <label>Nombre completo *</label>
+          <input class="form-input" type="text" name="nombre" id="fNombre" placeholder="Ej: María García" required>
         </div>
         <div class="form-row">
           <div class="form-group">
@@ -392,7 +386,6 @@ function abrirModal() {
   document.getElementById('modalTitulo').textContent = 'Nuevo Cliente';
   document.getElementById('clienteId').value = '0';
   document.getElementById('fNombre').value = '';
-  document.getElementById('fApellido').value = '';
   document.getElementById('fTelefono').value = '';
   document.getElementById('fEmail').value = '';
   document.getElementById('fDireccion').value = '';
@@ -403,8 +396,8 @@ function abrirModal() {
 function editarCliente(c) {
   document.getElementById('modalTitulo').textContent = 'Editar Cliente';
   document.getElementById('clienteId').value = c.id;
-  document.getElementById('fNombre').value = c.nombre;
-  document.getElementById('fApellido').value = c.apellido;
+  const nombreCompleto = (c.nombre + (c.apellido ? ' ' + c.apellido : '')).trim();
+  document.getElementById('fNombre').value = nombreCompleto;
   document.getElementById('fTelefono').value = c.telefono || '';
   document.getElementById('fEmail').value = c.email || '';
   document.getElementById('fDireccion').value = c.direccion || '';

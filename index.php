@@ -384,7 +384,10 @@ $avClasses    = ['av-a','av-b','av-c','av-d','av-e'];
           <div id="tab-cobros" class="tab-content active">
             <?php if ($alertasSesiones->num_rows === 0): ?>
               <div class="empty-alert">Sin cobros pendientes</div>
-            <?php else: while ($a = $alertasSesiones->fetch_assoc()): ?>
+            <?php else: while ($a = $alertasSesiones->fetch_assoc()):
+              $dtA = new DateTime($a['fecha_ref']);
+              $urlSesion = "modulos/sesiones.php?anio=" . $dtA->format('Y') . "&mes=" . $dtA->format('n') . "&dia=" . $dtA->format('j') . "&sesion_id=" . (int)$a['ref_id'];
+            ?>
             <div class="notif-item">
               <div class="notif-icon ni-rose"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg></div>
               <div style="flex:1;">
@@ -392,7 +395,7 @@ $avClasses    = ['av-a','av-b','av-c','av-d','av-e'];
                 <div class="notif-desc"><?= formatoFecha($a['fecha_ref']) ?></div>
                 <div class="notif-monto">Saldo: <?= formatoPeso($a['saldo']) ?></div>
               </div>
-              <a href="modulos/sesiones.php" style="font-size:10px;color:var(--rose-deep);font-weight:700;text-decoration:none;white-space:nowrap;">Ver →</a>
+              <a href="<?= $urlSesion ?>" style="font-size:10px;color:var(--rose-deep);font-weight:700;text-decoration:none;white-space:nowrap;">Ver →</a>
             </div>
             <?php endwhile; endif; ?>
           </div>
@@ -401,14 +404,17 @@ $avClasses    = ['av-a','av-b','av-c','av-d','av-e'];
           <div id="tab-entregas" class="tab-content">
             <?php if ($alertasEntrega->num_rows === 0): ?>
               <div class="empty-alert">Sin entregas pendientes</div>
-            <?php else: while ($a = $alertasEntrega->fetch_assoc()): ?>
+            <?php else: while ($a = $alertasEntrega->fetch_assoc()):
+              $dtA = new DateTime($a['fecha_ref']);
+              $urlSesion = "modulos/sesiones.php?anio=" . $dtA->format('Y') . "&mes=" . $dtA->format('n') . "&dia=" . $dtA->format('j') . "&sesion_id=" . (int)$a['ref_id'];
+            ?>
             <div class="notif-item">
               <div class="notif-icon ni-orange"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg></div>
               <div style="flex:1;">
                 <div class="notif-title"><?= htmlspecialchars($a['cliente']) ?></div>
                 <div class="notif-desc">Sesión: <?= formatoFecha($a['fecha_ref']) ?> · Fotos pendientes</div>
               </div>
-              <a href="modulos/sesiones.php" style="font-size:10px;color:var(--teal-deep);font-weight:700;text-decoration:none;">Ver →</a>
+              <a href="<?= $urlSesion ?>" style="font-size:10px;color:var(--teal-deep);font-weight:700;text-decoration:none;">Ver →</a>
             </div>
             <?php endwhile; endif; ?>
           </div>

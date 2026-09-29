@@ -43,10 +43,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $cliente_id     = sanitizeInt($_POST['cliente_id'] ?? 0);
         $cita_id        = sanitizeInt($_POST['cita_id'] ?? 0) ?: null;
         $fecha_sesion   = sanitize($_POST['fecha_sesion'] ?? '');
+        $hora_sesion    = sanitize($_POST['hora_sesion'] ?? '');
         $abono          = max(0, floatval($_POST['abono'] ?? 0));
         $estado_entrega = sanitize($_POST['estado_entrega'] ?? 'pendiente');
         $notas          = sanitize($_POST['notas'] ?? '');
         $metodo_pago    = sanitize($_POST['metodo_pago'] ?? 'efectivo');
+
+        // Normalizar hora a formato HH:MM:SS
+        if ($hora_sesion !== '' && strlen($hora_sesion) === 5) $hora_sesion .= ':00';
 
         // Sesión principal.
         $producto_id_principal = sanitizeInt($_POST['producto_principal_id'] ?? 0);
@@ -99,9 +103,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
 
-        if (!$cliente_id || !$fecha_sesion || !$producto_id_principal || !$precioPrincipal) {
-            $error = 'Cliente, fecha y tipo de sesión son obligatorios.';
-        } else {
+        if (!$cliente_id || !$fecha_sesion || !$hora_sesion || !$producto_id_principal || !$precioPrincipal) {
+            $error = 'Cliente, fecha, hora y tipo de sesión son obligatorios.';
+        }
+
+        // Verificar que no haya otra sesión agendada en la misma fecha y hora.
+        if (!$error) {
+            if ($id > 0) {
+                $stmtChk = $db->prepare("SELECT id FROM sesiones WHERE fecha_sesion=? AND hora_sesion=? AND id<>? LIMIT 1");
+                $stmtChk->bind_param("ssi", $fecha_sesion, $hora_sesion, $id);
+            } else {
+                $stmtChk = $db->prepare("SELECT id FROM sesiones WHERE fecha_sesion=? AND hora_sesion=? LIMIT 1");
+                $stmtChk->bind_param("ss", $fecha_sesion, $hora_sesion);
+            }
+            $stmtChk->execute();
+            if ($stmtChk->get_result()->num_rows > 0) {
+                $error = 'Ya hay una sesión agendada a esa hora. Elige otra hora disponible.';
+            }
+            $stmtChk->close();
+        }
+
+        if (!$error) {
             // El estado de pago se calcula automáticamente según el abono.
             if ($abono > $total) $abono = $total;
             $estado_pago = ($total > 0 && $abono >= $total) ? 'pagado' : ($abono > 0 ? 'abonado' : 'pendiente');
@@ -110,8 +132,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 // Obtener estado anterior para detectar cambios de ingreso.
                 $prev = $db->query("SELECT estado_pago, total, abono FROM sesiones WHERE id=$id")->fetch_assoc();
 
-                $stmt = $db->prepare("UPDATE sesiones SET cliente_id=?,cita_id=?,producto_id=?,fecha_sesion=?,total=?,abono=?,estado_pago=?,estado_entrega=?,notas=?,metodo_pago=? WHERE id=?");
-                $stmt->bind_param("iiisddssssi", $cliente_id,$cita_id,$producto_id_principal,$fecha_sesion,$total,$abono,$estado_pago,$estado_entrega,$notas,$metodo_pago,$id);
+                $stmt = $db->prepare("UPDATE sesiones SET cliente_id=?,cita_id=?,producto_id=?,fecha_sesion=?,hora_sesion=?,total=?,abono=?,estado_pago=?,estado_entrega=?,notas=?,metodo_pago=? WHERE id=?");
+                $stmt->bind_param("iiissddssssi", $cliente_id,$cita_id,$producto_id_principal,$fecha_sesion,$hora_sesion,$total,$abono,$estado_pago,$estado_entrega,$notas,$metodo_pago,$id);
                 $stmt->execute(); $stmt->close();
 
                 // Reemplazar únicamente los adicionales de la sesión.
@@ -156,8 +178,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 }
                 $mensaje = 'Sesión actualizada correctamente.';
             } else {
-                $stmt = $db->prepare("INSERT INTO sesiones (cliente_id,cita_id,producto_id,fecha_sesion,total,abono,estado_pago,estado_entrega,notas,metodo_pago) VALUES (?,?,?,?,?,?,?,?,?,?)");
-                $stmt->bind_param("iiisddssss", $cliente_id,$cita_id,$producto_id_principal,$fecha_sesion,$total,$abono,$estado_pago,$estado_entrega,$notas,$metodo_pago);
+                $stmt = $db->prepare("INSERT INTO sesiones (cliente_id,cita_id,producto_id,fecha_sesion,hora_sesion,total,abono,estado_pago,estado_entrega,notas,metodo_pago) VALUES (?,?,?,?,?,?,?,?,?,?,?)");
+                $stmt->bind_param("iiissddssss", $cliente_id,$cita_id,$producto_id_principal,$fecha_sesion,$hora_sesion,$total,$abono,$estado_pago,$estado_entrega,$notas,$metodo_pago);
                 $stmt->execute();
                 $nuevaSesionId = $stmt->insert_id;
                 $stmt->close();
@@ -274,8 +296,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 // ── Calendario ──
 $hoy   = new DateTime();
-$anioC = sanitizeInt($_GET['anio'] ?? $hoy->format('Y'));
-$mesC  = sanitizeInt($_GET['mes']  ?? $hoy->format('n'));
+$sesionParamId = sanitizeInt($_GET['sesion_id'] ?? ($_GET['id'] ?? 0));
+
+$anioParam = isset($_GET['anio']) ? sanitizeInt($_GET['anio']) : null;
+$mesParam  = isset($_GET['mes'])  ? sanitizeInt($_GET['mes'])  : null;
+$diaParam  = isset($_GET['dia'])  ? sanitizeInt($_GET['dia'])  : null;
+
+// Si viene sesion_id y falta algún parámetro de fecha, consultamos la fecha real de la sesión
+if ($sesionParamId > 0 && ($anioParam === null || $mesParam === null || $diaParam === null)) {
+    $stmtSDate = $db->prepare("SELECT fecha_sesion FROM sesiones WHERE id = ?");
+    if ($stmtSDate) {
+        $stmtSDate->bind_param("i", $sesionParamId);
+        $stmtSDate->execute();
+        $resSDate = $stmtSDate->get_result();
+        if ($rowSDate = $resSDate->fetch_assoc()) {
+            if (!empty($rowSDate['fecha_sesion'])) {
+                $dtS = new DateTime($rowSDate['fecha_sesion']);
+                if ($anioParam === null) $anioParam = (int)$dtS->format('Y');
+                if ($mesParam === null)  $mesParam  = (int)$dtS->format('n');
+                if ($diaParam === null)  $diaParam  = (int)$dtS->format('j');
+            }
+        }
+        $stmtSDate->close();
+    }
+}
+
+$anioC = $anioParam ?? (int)$hoy->format('Y');
+$mesC  = $mesParam  ?? (int)$hoy->format('n');
 if ($mesC < 1)  { $mesC = 12; $anioC--; }
 if ($mesC > 12) { $mesC = 1;  $anioC++; }
 $primerDia = new DateTime("$anioC-$mesC-01");
@@ -303,7 +350,7 @@ if ($rSP) {
 
 $fechaIni = "$anioC-$mesC-01";
 $fechaFin = "$anioC-$mesC-$diasMes";
-$stmtCal  = $db->prepare("SELECT s.*,cl.nombre,cl.apellido,p.nombre AS servicio FROM sesiones s JOIN clientes cl ON s.cliente_id=cl.id LEFT JOIN productos p ON s.producto_id=p.id WHERE s.fecha_sesion BETWEEN ? AND ? ORDER BY s.fecha_sesion,s.id");
+$stmtCal  = $db->prepare("SELECT s.*,cl.nombre,cl.apellido,p.nombre AS servicio FROM sesiones s JOIN clientes cl ON s.cliente_id=cl.id LEFT JOIN productos p ON s.producto_id=p.id WHERE s.fecha_sesion BETWEEN ? AND ? ORDER BY s.fecha_sesion, s.hora_sesion, s.id");
 $stmtCal->bind_param("ss", $fechaIni, $fechaFin);
 $stmtCal->execute();
 $sesionesCalendario = [];
@@ -321,8 +368,42 @@ while ($row = $res->fetch_assoc()) {
 }
 $stmtCal->close();
 
-$diaSeleccionado = sanitizeInt($_GET['dia'] ?? $hoy->format('j'));
+$diaSeleccionado = $diaParam ?? (int)$hoy->format('j');
+if ($diaSeleccionado > $diasMes) $diaSeleccionado = $diasMes;
+if ($diaSeleccionado < 1) $diaSeleccionado = 1;
 $sesionesDelDia  = $sesionesCalendario[$diaSeleccionado] ?? [];
+
+// ── Agenda por hora del día seleccionado (08:00 a 20:00) ──
+$horasAgendaSesiones = [];
+for ($h = 8; $h <= 20; $h++) $horasAgendaSesiones[] = str_pad($h, 2, '0', STR_PAD_LEFT) . ':00';
+
+$sesionesPorHora      = [];
+$sesionesFueraHorario = [];
+foreach ($sesionesDelDia as $se) {
+    if (!empty($se['hora_sesion'])) {
+        $horaFloor = substr($se['hora_sesion'], 0, 2) . ':00';
+        if (in_array($horaFloor, $horasAgendaSesiones, true)) {
+            $sesionesPorHora[$horaFloor][] = $se;
+        } else {
+            $sesionesFueraHorario[] = $se;
+        }
+    } else {
+        $sesionesFueraHorario[] = $se;
+    }
+}
+// Ordenar por minuto exacto dentro de cada hora.
+foreach ($sesionesPorHora as $h => &$listaHora) {
+    usort($listaHora, function($a, $b){ return strcmp($a['hora_sesion'] ?? '', $b['hora_sesion'] ?? ''); });
+}
+unset($listaHora);
+
+// Armar la agenda completa (horas fijas + bloque "Otras" si aplica).
+$agendaSesionesDelDia = [];
+foreach ($horasAgendaSesiones as $hora) $agendaSesionesDelDia[$hora] = $sesionesPorHora[$hora] ?? [];
+if (!empty($sesionesFueraHorario)) $agendaSesionesDelDia['Otras'] = $sesionesFueraHorario;
+
+// Mostrar únicamente las horas que sí tienen sesiones agendadas.
+$agendaSesionesDelDia = array_filter($agendaSesionesDelDia, function($lista){ return !empty($lista); });
 
 // Stats
 $r = $db->query("SELECT COUNT(*) as t FROM sesiones WHERE estado_pago!='pagado'");           $pagosPend    = $r->fetch_assoc()['t'];
@@ -339,7 +420,7 @@ $totalRegistros = $stmtC->get_result()->fetch_assoc()['total'];
 $totalPaginas   = ceil($totalRegistros / $porPagina);
 $stmtC->close();
 
-$stmtL = $db->prepare("SELECT s.*,cl.nombre,cl.apellido,cl.telefono,p.nombre AS servicio FROM sesiones s JOIN clientes cl ON s.cliente_id=cl.id LEFT JOIN productos p ON s.producto_id=p.id $where ORDER BY s.fecha_sesion DESC,s.id DESC LIMIT ? OFFSET ?");
+$stmtL = $db->prepare("SELECT s.*,cl.nombre,cl.apellido,cl.telefono,p.nombre AS servicio FROM sesiones s JOIN clientes cl ON s.cliente_id=cl.id LEFT JOIN productos p ON s.producto_id=p.id $where ORDER BY s.fecha_sesion DESC, s.hora_sesion DESC, s.id DESC LIMIT ? OFFSET ?");
 $tiposL = $tipos.'ii'; $paramsL = array_merge($params, [$porPagina, $offset]);
 $stmtL->bind_param($tiposL, ...$paramsL);
 $stmtL->execute();
@@ -348,7 +429,7 @@ $stmtL->close();
 
 // Datos completos para que Editar funcione desde calendario y listado sin depender del onclick.
 $sesionesParaJS = [];
-$rJS = $db->query("SELECT s.*,cl.nombre,cl.apellido,cl.telefono,p.nombre AS servicio FROM sesiones s JOIN clientes cl ON s.cliente_id=cl.id LEFT JOIN productos p ON s.producto_id=p.id ORDER BY s.fecha_sesion DESC,s.id DESC");
+$rJS = $db->query("SELECT s.*,cl.nombre,cl.apellido,cl.telefono,p.nombre AS servicio FROM sesiones s JOIN clientes cl ON s.cliente_id=cl.id LEFT JOIN productos p ON s.producto_id=p.id ORDER BY s.fecha_sesion DESC, s.hora_sesion DESC, s.id DESC");
 if ($rJS) {
     while ($rowJS = $rJS->fetch_assoc()) {
         $sidJS = (int)$rowJS['id'];
@@ -464,10 +545,48 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
   .dot-pagado{background:var(--teal-deep);}
   .dot-abonado{background:#c9943a;}
   .time-slots{display:flex;flex-direction:column;gap:0;padding:6px 20px 16px;}
-  .ses-block{border-radius:10px;padding:9px 13px;cursor:pointer;transition:all .18s;margin-bottom:8px;background:var(--rose-pale);border:1.5px solid var(--rose-light);border-left:4px solid var(--rose);}
+  .time-slot{display:flex;gap:14px;align-items:flex-start;min-height:52px;padding:4px 0;border-bottom:1px dashed var(--border);}
+  .time-slot:last-child{border-bottom:none;}
+  .slot-time{width:50px;font-size:10.5px;color:var(--text-dim);flex-shrink:0;padding-top:7px;font-weight:700;}
+  .slot-line{width:1.5px;background:var(--border);flex-shrink:0;align-self:stretch;margin-top:4px;}
+  .slot-content{flex:1;padding-bottom:6px;min-width:0;}
+  .slot-empty{font-size:11px;color:var(--text-dim);padding-top:7px;font-style:italic;}
+  .ses-block{border-radius:10px;padding:9px 13px;cursor:pointer;transition:all .18s;margin-bottom:8px;background:var(--rose-pale);border:1.5px solid var(--rose-light);border-left:4px solid var(--rose);position:relative;}
   .ses-block:hover{transform:translateX(2px);}
   .ses-block.alt{background:var(--teal-pale);border:1.5px solid var(--teal-light);border-left:4px solid var(--teal);}
   .ses-block.alt2{background:var(--lav-pale);border:1.5px solid var(--lav-light);border-left:4px solid var(--lavender);}
+  .ses-block.highlight-sesion {
+    border: 2px solid var(--rose) !important;
+    border-left: 6px solid var(--rose-deep) !important;
+    background: #fff4f8 !important;
+    box-shadow: 0 0 0 4px rgba(232, 120, 154, 0.4), 0 8px 24px rgba(212, 85, 122, 0.25) !important;
+    animation: sesionPulse 2s infinite ease-in-out;
+  }
+  @keyframes sesionPulse {
+    0%, 100% {
+      box-shadow: 0 0 0 4px rgba(232, 120, 154, 0.4), 0 8px 20px rgba(212, 85, 122, 0.2);
+    }
+    50% {
+      box-shadow: 0 0 0 8px rgba(232, 120, 154, 0.7), 0 12px 28px rgba(212, 85, 122, 0.35);
+      transform: scale(1.015);
+    }
+  }
+  .ses-tag-highlight {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--rose-deep);
+    color: #fff;
+    font-size: 9.5px;
+    font-weight: 800;
+    text-transform: uppercase;
+    letter-spacing: .06em;
+    padding: 3px 8px;
+    border-radius: 6px;
+    margin-bottom: 6px;
+    box-shadow: 0 2px 6px rgba(212, 85, 122, 0.3);
+  }
+  tr.highlight-row td { background: var(--rose-pale) !important; font-weight: 600; }
   .ses-nombre{font-size:13px;color:var(--navy);font-weight:700;margin-bottom:2px;}
   .ses-service{font-size:11px;color:var(--text-mid);}
   .ses-monto{font-family:'Dancing Script',cursive;font-size:15px;color:var(--navy);margin-top:3px;}
@@ -639,30 +758,43 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
         <div class="time-slots">
           <?php if(empty($sesionesDelDia)): ?>
             <div class="empty-dia">Sin sesiones este día</div>
-          <?php else: $i=0; foreach($sesionesDelDia as $se): $colorCls=$coloresBloque[$i%3]; ?>
-          <div class="ses-block <?= $colorCls ?>" onclick="editarSesionPorId(<?= (int)$se['id'] ?>)">
-            <div class="ses-nombre"><?= htmlspecialchars($se['nombre'].' '.$se['apellido']) ?></div>
-            <div class="ses-service"><?= htmlspecialchars($se['servicio']??'Sin servicio') ?></div>
-            <div class="ses-monto"><?= formatoPeso($se['total']) ?>
-              <?php if(($se['saldo']??0)>0 && $se['estado_pago']!=='pagado'): ?> <span class="ses-saldo"> · Saldo: <?= formatoPeso($se['saldo']) ?></span><?php endif; ?>
-            </div>
-            <div class="ses-actions" onclick="event.stopPropagation()">
-              <form method="POST" style="display:inline;">
-                <input type="hidden" name="accion" value="actualizar_entrega">
-                <input type="hidden" name="id" value="<?= $se['id'] ?>">
-                <select name="estado_entrega" class="form-input" style="padding:3px 8px;font-size:11px;width:auto;" onchange="this.form.submit()">
-                  <option value="pendiente" <?= $se['estado_entrega']==='pendiente'?'selected':'' ?>>Pendiente</option>
-                  <option value="en_edicion" <?= $se['estado_entrega']==='en_edicion'?'selected':'' ?>>En edición</option>
-                  <option value="entregado" <?= $se['estado_entrega']==='entregado'?'selected':'' ?>>Entregado</option>
-                </select>
-              </form>
-              <span class="status-pill pill-<?= $se['estado_pago'] ?>"><?= ucfirst($se['estado_pago']) ?></span>
-              <button class="btn btn-teal btn-sm" onclick="event.stopPropagation();abrirGaleria(<?= $se['id'] ?>, '<?= htmlspecialchars($se['nombre']) ?>')">📷 Fotos</button>
-              <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();editarSesionPorId(<?= $se['id'] ?>)">Editar</button>
-              <button class="btn btn-danger btn-sm" onclick="event.stopPropagation();confirmarEliminar(<?= $se['id'] ?>,'<?= htmlspecialchars($se['nombre']) ?>')">Eliminar</button>
+          <?php else: $colorIdx=0; foreach($agendaSesionesDelDia as $horaSlot => $sesionesEnHora): ?>
+          <div class="time-slot">
+            <div class="slot-time"><?= $horaSlot === 'Otras' ? 'Otras' : formatoHora($horaSlot.':00') ?></div>
+            <div class="slot-line"></div>
+            <div class="slot-content">
+              <?php if(empty($sesionesEnHora)): ?>
+                <div class="slot-empty"></div>
+              <?php else: foreach($sesionesEnHora as $se): $colorCls=$coloresBloque[$colorIdx%3]; $colorIdx++; $esTarget = ($sesionParamId===(int)$se['id']); ?>
+              <div class="ses-block <?= $colorCls ?> <?= $esTarget ? 'highlight-sesion' : '' ?>" id="sesion-block-<?= (int)$se['id'] ?>" onclick="editarSesionPorId(<?= (int)$se['id'] ?>)">
+                <?php if ($esTarget): ?>
+                  <div class="ses-tag-highlight">📍 Seleccionada desde Dashboard</div>
+                <?php endif; ?>
+                <div class="ses-nombre"><?= htmlspecialchars($se['nombre'].' '.$se['apellido']) ?></div>
+                <div class="ses-service"><?= $se['hora_sesion'] ? formatoHora($se['hora_sesion']).' · ' : '' ?><?= htmlspecialchars($se['servicio']??'Sin servicio') ?></div>
+                <div class="ses-monto"><?= formatoPeso($se['total']) ?>
+                  <?php if(($se['saldo']??0)>0 && $se['estado_pago']!=='pagado'): ?> <span class="ses-saldo"> · Saldo: <?= formatoPeso($se['saldo']) ?></span><?php endif; ?>
+                </div>
+                <div class="ses-actions" onclick="event.stopPropagation()">
+                  <form method="POST" style="display:inline;">
+                    <input type="hidden" name="accion" value="actualizar_entrega">
+                    <input type="hidden" name="id" value="<?= $se['id'] ?>">
+                    <select name="estado_entrega" class="form-input" style="padding:3px 8px;font-size:11px;width:auto;" onchange="this.form.submit()">
+                      <option value="pendiente" <?= $se['estado_entrega']==='pendiente'?'selected':'' ?>>Pendiente</option>
+                      <option value="en_edicion" <?= $se['estado_entrega']==='en_edicion'?'selected':'' ?>>En edición</option>
+                      <option value="entregado" <?= $se['estado_entrega']==='entregado'?'selected':'' ?>>Entregado</option>
+                    </select>
+                  </form>
+                  <span class="status-pill pill-<?= $se['estado_pago'] ?>"><?= ucfirst($se['estado_pago']) ?></span>
+                  <button class="btn btn-teal btn-sm" onclick="event.stopPropagation();abrirGaleria(<?= $se['id'] ?>, '<?= htmlspecialchars($se['nombre']) ?>')">📷 Fotos</button>
+                  <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();editarSesionPorId(<?= $se['id'] ?>)">Editar</button>
+                  <button class="btn btn-danger btn-sm" onclick="event.stopPropagation();confirmarEliminar(<?= $se['id'] ?>,'<?= htmlspecialchars($se['nombre']) ?>')">Eliminar</button>
+                </div>
+              </div>
+              <?php endforeach; endif; ?>
             </div>
           </div>
-          <?php $i++; endforeach; endif; ?>
+          <?php endforeach; endif; ?>
         </div>
       </div>
 
@@ -695,9 +827,15 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
                 <input type="hidden" name="cliente_id" id="qClienteIdInput" required>
               </div>
             </div>
-            <div class="form-group">
-              <label>Fecha *</label>
-              <input class="form-input" type="date" name="fecha_sesion" value="<?= "$anioC-".str_pad($mesC,2,'0',STR_PAD_LEFT)."-".str_pad($diaSeleccionado,2,'0',STR_PAD_LEFT) ?>" required>
+            <div class="form-row">
+              <div class="form-group">
+                <label>Fecha *</label>
+                <input class="form-input" type="date" name="fecha_sesion" value="<?= "$anioC-".str_pad($mesC,2,'0',STR_PAD_LEFT)."-".str_pad($diaSeleccionado,2,'0',STR_PAD_LEFT) ?>" required>
+              </div>
+              <div class="form-group">
+                <label>Hora *</label>
+                <input class="form-input" type="time" name="hora_sesion" id="qHora" required>
+              </div>
             </div>
             <div class="form-group">
               <label>Tipo de sesión *</label>
@@ -771,16 +909,16 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
       </div>
       <div style="overflow-x:auto;">
       <table>
-        <thead><tr><th>Cliente</th><th>Servicio</th><th>Fecha</th><th>Total / Saldo</th><th>Pago</th><th>Estado de sesión</th><th>Acciones</th></tr></thead>
+        <thead><tr><th>Cliente</th><th>Servicio</th><th>Fecha</th><th>Hora</th><th>Total / Saldo</th><th>Pago</th><th>Estado de sesión</th><th>Acciones</th></tr></thead>
         <tbody>
           <?php if($listadoSesiones->num_rows===0): ?>
-            <tr><td colspan="7" class="empty-row">No hay sesiones con ese filtro.</td></tr>
+            <tr><td colspan="8" class="empty-row">No hay sesiones con ese filtro.</td></tr>
           <?php else: $i=0; while($s=$listadoSesiones->fetch_assoc()):
             $sid = (int)$s['id'];
             $s['adicionales'] = $adicionalesPorSesion[$sid] ?? [];
             $s['servicios_ids'] = array_map(function($a){ return (int)$a['producto_id']; }, $s['adicionales']);
           ?>
-          <tr>
+          <tr id="sesion-row-<?= (int)$s['id'] ?>" class="<?= ($sesionParamId===(int)$s['id']) ? 'highlight-row' : '' ?>">
             <td>
               <div class="client-cell">
                 <div class="client-avatar <?= $avClasses[$i%5] ?>"><?= mb_strtoupper(mb_substr($s['nombre'],0,1)) ?></div>
@@ -789,6 +927,7 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
             </td>
             <td><?= htmlspecialchars($s['servicio']??'—') ?></td>
             <td style="font-size:11px;font-weight:600;"><?= formatoFecha($s['fecha_sesion']) ?></td>
+            <td style="font-size:11px;font-weight:600;"><?= $s['hora_sesion'] ? formatoHora($s['hora_sesion']) : '—' ?></td>
             <td>
               <div style="font-family:'Dancing Script',cursive;font-size:15px;color:var(--navy);"><?= formatoPeso($s['total']) ?></div>
               <?php if(($s['saldo']??0)>0): ?><div style="font-size:10px;color:var(--rose-deep);font-weight:700;">Saldo: <?= formatoPeso($s['saldo']) ?></div><?php endif; ?>
@@ -864,10 +1003,16 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
           </div>
         </div>
 
-        <!-- Fecha -->
-        <div class="form-group">
-          <label>Fecha *</label>
-          <input class="form-input" type="date" name="fecha_sesion" id="mFecha" required>
+        <!-- Fecha y hora -->
+        <div class="form-row">
+          <div class="form-group">
+            <label>Fecha *</label>
+            <input class="form-input" type="date" name="fecha_sesion" id="mFecha" required>
+          </div>
+          <div class="form-group">
+            <label>Hora *</label>
+            <input class="form-input" type="time" name="hora_sesion" id="mHora" required>
+          </div>
         </div>
 
         <!-- Tipo de sesión y adicionales -->
@@ -1139,6 +1284,7 @@ function editarSesion(s){
   document.getElementById('mClienteSearch').value=(s.nombre||'');
   document.getElementById('mClienteIdInput').value=s.cliente_id;
   document.getElementById('mFecha').value=s.fecha_sesion;
+  document.getElementById('mHora').value=s.hora_sesion ? s.hora_sesion.substring(0,5) : '';
   document.getElementById('mAbono').value=s.abono;
   document.getElementById('mEstadoEntrega').value=s.estado_entrega||'pendiente';
   document.getElementById('mMetodoPago').value=s.metodo_pago||'efectivo';
@@ -1257,6 +1403,30 @@ function previsualizarFotos(input){
       prev.appendChild(img);
     };
     reader.readAsDataURL(file);
+  });
+}
+
+// ── Enfoque y resaltado automático desde Dashboard ──
+const targetSesionId = <?= (int)$sesionParamId ?>;
+const autoEditar = <?= (isset($_GET['editar']) && $_GET['editar'] == '1') ? 'true' : 'false' ?>;
+
+if (targetSesionId > 0) {
+  window.addEventListener('DOMContentLoaded', () => {
+    setTimeout(() => {
+      const el = document.getElementById('sesion-block-' + targetSesionId);
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+      const row = document.getElementById('sesion-row-' + targetSesionId);
+      if (row) {
+        row.classList.add('highlight-row');
+      }
+      if (autoEditar) {
+        setTimeout(() => {
+          editarSesionPorId(targetSesionId);
+        }, 350);
+      }
+    }, 250);
   });
 }
 </script>

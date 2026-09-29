@@ -50,8 +50,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   .card{background:var(--surface);border:1.5px solid var(--border);border-radius:24px;padding:44px 40px;width:100%;max-width:400px;box-shadow:0 8px 40px rgba(180,120,160,.15);position:relative;z-index:1;animation:fadeUp .5s ease both;}
   @keyframes fadeUp{from{opacity:0;transform:translateY(20px)}to{opacity:1;transform:translateY(0)}}
   .logo-area{display:flex;flex-direction:column;align-items:center;margin-bottom:32px;}
-  .logo-circle{width:80px;height:80px;border-radius:50%;background:linear-gradient(135deg,var(--rose-light),var(--teal-light));display:flex;align-items:center;justify-content:center;font-family:'Dancing Script',cursive;font-size:38px;color:var(--navy);font-weight:700;margin-bottom:12px;box-shadow:0 4px 20px rgba(232,120,154,.3);overflow:hidden;}
-  .logo-circle img{width:100%;height:100%;object-fit:cover;border-radius:50%;}
+  .logo-circle{width:80px;height:80px;border-radius:50%;background:linear-gradient(135deg,var(--rose-light),var(--teal-light));display:flex;align-items:center;justify-content:center;font-family:'Dancing Script',cursive;font-size:38px;color:var(--navy);font-weight:700;margin-bottom:12px;box-shadow:0 4px 20px rgba(232,120,154,.3);}
   .logo-name{font-family:'Dancing Script',cursive;font-size:26px;font-weight:700;color:var(--navy);}
   .logo-sub{font-size:10px;color:var(--teal);letter-spacing:.22em;text-transform:uppercase;font-weight:600;margin-top:4px;}
   h2{font-size:14px;color:var(--text-mid);font-weight:600;text-align:center;margin-bottom:24px;}
@@ -67,9 +66,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <body>
 <div class="card">
   <div class="logo-area">
-    <div class="logo-circle">
-      <img src="uploads/perfiles/logo.jpg" alt="Logo">
-    </div>
+    <div class="logo-circle">L</div>
     <div class="logo-name">Lizdy Pineda</div>
     <div class="logo-sub">Fotoestudio</div>
   </div>

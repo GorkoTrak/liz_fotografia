@@ -470,8 +470,8 @@ $tiposColor = ['sesion' => 'rose', 'combo' => 'teal', 'adicional' => 'orange'];
 </form>
 
 <script>
-function actualizarCategoriaSegunTipo(categoriaActual = '') {
-  const tipo = document.querySelector('input[name="tipo"]:checked')?.value || 'sesion';
+function actualizarCategoriaSegunTipo(categoriaActual = '', tipoForzado = null) {
+  const tipo = tipoForzado || document.querySelector('#modalProducto input[type="radio"][name="tipo"]:checked')?.value || 'sesion';
   const select = document.getElementById('mCategoriaSelect');
   const nueva = document.getElementById('mCategoriaNueva');
   const hidden = document.getElementById('mCategoria');
@@ -547,8 +547,12 @@ function abrirModal() {
   document.getElementById('mCategoriaNueva').classList.remove('visible');
   document.getElementById('mPrecio').value = '';
   document.getElementById('mEstado').value = 'activo';
-  document.querySelector('input[name="tipo"][value="sesion"]').checked = true;
-  actualizarCategoriaSegunTipo('');
+  
+  const tipoDefecto = '<?= ($filtroTipo && in_array($filtroTipo, ['sesion','combo','adicional'])) ? $filtroTipo : 'sesion' ?>';
+  document.querySelectorAll('#modalProducto input[type="radio"][name="tipo"]').forEach(function(r) {
+    r.checked = (r.value === tipoDefecto);
+  });
+  actualizarCategoriaSegunTipo('', tipoDefecto);
   document.getElementById('modalProducto').classList.add('open');
 }
 
@@ -557,17 +561,21 @@ function editarProducto(p) {
   document.getElementById('productoId').value    = p.id;
   document.getElementById('mNombre').value       = p.nombre;
   document.getElementById('mDescripcion').value  = p.descripcion || '';
-  document.getElementById('mCategoria').value    = p.categoria || '';
   document.getElementById('mPrecio').value       = p.precio;
   document.getElementById('mEstado').value       = p.estado;
-  const radio = document.querySelector('input[name="tipo"][value="' + p.tipo + '"]');
-  if (radio) radio.checked = true;
-  actualizarCategoriaSegunTipo(p.categoria || '');
+
+  // Seleccionar exactamente el radio del tipo que corresponde al producto
+  const tipoProducto = p.tipo || 'sesion';
+  document.querySelectorAll('#modalProducto input[type="radio"][name="tipo"]').forEach(function(r) {
+    r.checked = (r.value === tipoProducto);
+  });
+
+  actualizarCategoriaSegunTipo(p.categoria || '', tipoProducto);
   document.getElementById('modalProducto').classList.add('open');
 }
 
-document.querySelectorAll('input[name="tipo"]').forEach(function(radio) {
-  radio.addEventListener('change', function() { actualizarCategoriaSegunTipo(''); });
+document.querySelectorAll('#modalProducto input[type="radio"][name="tipo"]').forEach(function(radio) {
+  radio.addEventListener('change', function() { actualizarCategoriaSegunTipo('', this.value); });
 });
 
 function cerrarModal() {
