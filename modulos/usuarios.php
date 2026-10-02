@@ -208,7 +208,7 @@ $avClasses = ['av-a','av-b','av-c','av-d','av-e'];
   .alert-error{background:var(--rose-pale);color:var(--rose-deep);border:1.5px solid var(--rose-light);}
   @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
 </style>
-</head>
+  </head>
 <body>
 <?php require_once '../includes/sidebar.php'; ?>
 <div class="main">
@@ -362,5 +362,5 @@ function previewFoto(input){
 document.getElementById('modalUsuario').addEventListener('click',function(e){if(e.target===this)cerrarModal();});
 <?php if($error): ?>document.getElementById('modalUsuario').classList.add('open');<?php endif; ?>
 </script>
-</body>
+  </body>
 </html>

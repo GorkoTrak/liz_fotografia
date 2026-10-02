@@ -243,7 +243,7 @@ $avClasses    = ['av-a','av-b','av-c','av-d','av-e'];
   .empty-row{text-align:center;padding:30px;color:var(--text-dim);font-size:12px;}
   @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
 </style>
-</head>
+  </head>
 <body>
 <?php require_once 'includes/sidebar.php'; ?>
 
@@ -453,10 +453,10 @@ $avClasses    = ['av-a','av-b','av-c','av-d','av-e'];
         </svg>
       </button>
       <?php endif; ?>
-      <a href="modulos/ingresos.php" class="btn btn-ghost" style="padding:5px 12px;font-size:11px;">Ver detalle →</a>
+      <a href="modulos/ingresos.php" class="btn btn-ghost" onclick="sessionStorage.removeItem('ingresos_desbloqueados');" style="padding:5px 12px;font-size:11px;">Ver detalle →</a>
     </div>
   </div>
-  <div class="chart-area" id="chartArea" style="<?= $esAdmin ? '' : 'filter:blur(6px);pointer-events:none;user-select:none;' ?>">
+  <div class="chart-area" id="chartArea" style="filter:blur(6px);pointer-events:none;user-select:none;">
         <?php
         $maxIngreso = 0;
         foreach ($datosMeses as $dm) $maxIngreso = max($maxIngreso, $dm['total']);
@@ -523,5 +523,5 @@ function toggleChart() {
     : '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/>';
 }
 </script>
-</body>
+  </body>
 </html>

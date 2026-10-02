@@ -25,7 +25,7 @@ if (($_SESSION['usuario_rol'] ?? '') !== 'admin') {
   a{display:inline-block;padding:10px 26px;background:linear-gradient(135deg,#e8789a,#c4547a);color:#fff;border-radius:20px;text-decoration:none;font-size:13px;font-weight:700;transition:opacity .2s;}
   a:hover{opacity:.88;}
 </style>
-</head>
+  </head>
 <body>
   <div class="card">
     <div class="icon">
@@ -37,7 +37,7 @@ if (($_SESSION['usuario_rol'] ?? '') !== 'admin') {
     <p>Solo el administrador puede acceder a esta sección.</p>
     <a href="../index.php">← Volver al inicio</a>
   </div>
-</body>
+  </body>
 </html>';
     exit;
 }
@@ -330,6 +330,70 @@ $avClasses     = ['av-a','av-b','av-c','av-d','av-e'];
   .empty-row{text-align:center;padding:36px;color:var(--text-dim);font-size:13px;}
 
   @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+
+  /* PRIVACY PROTECTION OVERLAY */
+  .privacy-guard-overlay {
+    position: fixed;
+    top: 0;
+    left: var(--sidebar-w);
+    right: 0;
+    bottom: 0;
+    background: rgba(250, 248, 246, 0.88);
+    backdrop-filter: blur(16px);
+    -webkit-backdrop-filter: blur(16px);
+    z-index: 99;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 24px;
+    animation: fadeUp 0.3s ease both;
+  }
+  .privacy-guard-card {
+    background: var(--surface);
+    border: 1.5px solid var(--border);
+    border-top: 4px solid var(--rose);
+    border-radius: 20px;
+    padding: 40px 36px;
+    max-width: 440px;
+    width: 100%;
+    text-align: center;
+    box-shadow: 0 12px 36px rgba(180, 120, 160, 0.18);
+  }
+  .privacy-guard-icon {
+    width: 68px;
+    height: 68px;
+    background: var(--rose-pale);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto 20px;
+    box-shadow: 0 4px 14px rgba(232, 120, 154, 0.25);
+  }
+  .privacy-guard-icon svg {
+    width: 32px;
+    height: 32px;
+    color: var(--rose-deep);
+  }
+  .privacy-guard-title {
+    font-family: 'Dancing Script', cursive;
+    font-size: 28px;
+    font-weight: 700;
+    color: var(--navy);
+    margin-bottom: 10px;
+  }
+  .privacy-guard-desc {
+    font-size: 13px;
+    color: var(--text-mid);
+    line-height: 1.6;
+    margin-bottom: 26px;
+  }
+  .privacy-guard-actions {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    flex-wrap: wrap;
+  }
 </style>
 </head>
 <body>
@@ -337,9 +401,41 @@ $avClasses     = ['av-a','av-b','av-c','av-d','av-e'];
 <?php require_once '../includes/sidebar.php'; ?>
 
 <div class="main">
+  <!-- TELÓN DE CONFIRMACIÓN / PRIVACIDAD DE INGRESOS -->
+  <div class="privacy-guard-overlay" id="privacyGuardOverlay">
+    <div class="privacy-guard-card">
+      <div class="privacy-guard-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+        </svg>
+      </div>
+      <div class="privacy-guard-title">Información Confidencial</div>
+      <div class="privacy-guard-desc">
+        Este módulo contiene las cuentas e ingresos financieros del negocio.<br>
+        ¿Deseas desbloquear y ver la información económica ahora?
+      </div>
+      <div class="privacy-guard-actions">
+        <a href="../index.php" class="btn btn-ghost" style="padding:10px 22px;">← Volver al Dashboard</a>
+        <button type="button" class="btn btn-primary" onclick="desbloquearIngresos()" style="padding:10px 24px;">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16">
+            <rect x="3" y="11" width="18" height="11" rx="2"/>
+            <path d="M7 11V7a5 5 0 0 1 9.9-1"/>
+          </svg>
+          Sí, ver ingresos
+        </button>
+      </div>
+    </div>
+  </div>
+
   <div class="topbar">
     <span class="page-title">Panel de Ingresos</span>
     <div class="topbar-sep"></div>
+    <button class="btn btn-ghost btn-sm" onclick="bloquearIngresos()" title="Ocultar cuentas y proteger vista" style="margin-right:4px;">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+      </svg>
+      Ocultar / Bloquear
+    </button>
     <button class="btn btn-primary" onclick="abrirModal()">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       Nuevo Movimiento
@@ -548,6 +644,31 @@ function eliminar(id,c){ if(confirm('¿Eliminar "'+c+'"?')){ document.getElement
 document.getElementById('modalMov').addEventListener('click',function(e){ if(e.target===this) cerrarModal(); });
 <?php if($error): ?>document.getElementById('modalMov').classList.add('open');<?php endif; ?>
 
+// ── Control de privacidad y confirmación de acceso a Ingresos ─────────
+const STORAGE_KEY = 'ingresos_desbloqueados';
+const overlay = document.getElementById('privacyGuardOverlay');
+
+function verificarAccesoIngresos() {
+  if (sessionStorage.getItem(STORAGE_KEY) === '1') {
+    if (overlay) overlay.style.display = 'none';
+  } else {
+    if (overlay) overlay.style.display = 'flex';
+  }
+}
+
+function desbloquearIngresos() {
+  sessionStorage.setItem(STORAGE_KEY, '1');
+  if (overlay) overlay.style.display = 'none';
+}
+
+function bloquearIngresos() {
+  sessionStorage.removeItem(STORAGE_KEY);
+  if (overlay) overlay.style.display = 'flex';
+}
+
+// Ejecutar al cargar la página
+verificarAccesoIngresos();
+
 // ── Gráfica dinámica Semana / Mes / Año ──────────────────────────────
 const datosMes = <?php
 echo json_encode([
@@ -619,5 +740,5 @@ function cambiarVista(vista){
   renderGrafica(map[vista]);
 }
 </script>
-</body>
+  </body>
 </html>

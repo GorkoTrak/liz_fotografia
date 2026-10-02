@@ -293,7 +293,7 @@ $tiposColor = ['sesion' => 'rose', 'combo' => 'teal', 'adicional' => 'orange'];
 
   @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
 </style>
-</head>
+  </head>
 <body>
 
 <!-- SIDEBAR -->
@@ -598,5 +598,5 @@ document.getElementById('modalProducto').classList.add('open');
 <?php endif; ?>
 </script>
 
-</body>
+  </body>
 </html>

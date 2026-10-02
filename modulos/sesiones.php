@@ -694,7 +694,7 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
   .cliente-option:hover{background:var(--rose-pale);color:var(--rose-deep);}
   .cliente-option.hidden{display:none;}
 </style>
-</head>
+  </head>
 <body>
 <?php require_once '../includes/sidebar.php'; ?>
 
@@ -1447,5 +1447,5 @@ if (isset($_GET['accion_galeria'])) {
     exit;
 }
 ?>
-</body>
+  </body>
 </html>

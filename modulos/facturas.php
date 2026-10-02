@@ -346,7 +346,7 @@ $avClasses = ['av-a','av-b','av-c','av-d','av-e'];
 
   @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
 </style>
-</head>
+  </head>
 <body>
 
 <!-- SIDEBAR -->
@@ -715,5 +715,5 @@ document.getElementById('modalFactura').classList.add('open');
 <?php endif; ?>
 </script>
 
-</body>
+  </body>
 </html>

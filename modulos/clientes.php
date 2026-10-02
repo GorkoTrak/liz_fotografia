@@ -7,6 +7,30 @@ $mensaje = '';
 $error   = '';
 
 // ============================================
+// HISTORIAL DE SESIONES (AJAX)
+// ============================================
+if (isset($_GET['ajax_historial'])) {
+    $cliente_id = sanitizeInt($_GET['ajax_historial']);
+    $sql = "SELECT s.id, s.fecha_sesion, s.hora_sesion, s.estado_pago, s.estado_entrega, p.nombre as producto_nombre 
+            FROM sesiones s 
+            LEFT JOIN productos p ON s.producto_id = p.id 
+            WHERE s.cliente_id = ? 
+            ORDER BY s.fecha_sesion DESC, s.hora_sesion DESC";
+    $stmt = $db->prepare($sql);
+    $stmt->bind_param("i", $cliente_id);
+    $stmt->execute();
+    $res = $stmt->get_result();
+    $sesiones = [];
+    while ($row = $res->fetch_assoc()) {
+        $sesiones[] = $row;
+    }
+    $stmt->close();
+    header('Content-Type: application/json');
+    echo json_encode($sesiones);
+    exit;
+}
+
+// ============================================
 // ACCIONES POST
 // ============================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -235,7 +259,7 @@ $avClasses = ['av-a','av-b','av-c','av-d','av-e'];
 
   @keyframes fadeUp{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
 </style>
-</head>
+  </head>
 <body>
 
 <!-- SIDEBAR -->
@@ -310,6 +334,7 @@ $avClasses = ['av-a','av-b','av-c','av-d','av-e'];
               <td><?= $c['ultima_cita'] ? formatoFecha($c['ultima_cita']) : '—' ?></td>
               <td>
                 <div class="actions">
+                  <button class="btn btn-ghost btn-sm" onclick="verHistorial(<?= $c['id'] ?>, '<?= htmlspecialchars($c['nombre'] . ' ' . $c['apellido']) ?>')">Historial</button>
                   <button class="btn btn-ghost btn-sm" onclick="editarCliente(<?= htmlspecialchars(json_encode($c)) ?>)">Editar</button>
                   <button class="btn btn-danger btn-sm" onclick="confirmarEliminar(<?= $c['id'] ?>, '<?= htmlspecialchars($c['nombre'] . ' ' . $c['apellido']) ?>')">Eliminar</button>
                 </div>
@@ -375,6 +400,35 @@ $avClasses = ['av-a','av-b','av-c','av-d','av-e'];
   </div>
 </div>
 
+<!-- MODAL HISTORIAL -->
+<div class="modal-overlay" id="modalHistorial">
+  <div class="modal" style="max-width:600px;">
+    <div class="modal-header">
+      <div class="modal-title" id="tituloHistorial">Historial de Sesiones</div>
+      <button class="modal-close" onclick="cerrarHistorial()">✕</button>
+    </div>
+    <div class="modal-body" style="padding: 0;">
+      <div id="historialCargando" style="padding: 30px; text-align: center; color: var(--text-dim); font-size: 13px;">Cargando...</div>
+      <div id="historialContenido" style="display: none;">
+        <table style="margin: 0; width: 100%;">
+          <thead>
+            <tr>
+              <th>Fecha y Hora</th>
+              <th>Sesión</th>
+              <th>Pago</th>
+              <th>Entrega</th>
+              <th>Acción</th>
+            </tr>
+          </thead>
+          <tbody id="historialTabla">
+            <!-- Filas inyectadas por JS -->
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- FORM ELIMINAR (oculto) -->
 <form method="POST" action="" id="formEliminar" style="display:none;">
   <input type="hidden" name="accion" value="eliminar">
@@ -409,6 +463,64 @@ function cerrarModal() {
   document.getElementById('modalCliente').classList.remove('open');
 }
 
+function cerrarHistorial() {
+  document.getElementById('modalHistorial').classList.remove('open');
+}
+
+function verHistorial(id, nombre) {
+  document.getElementById('tituloHistorial').textContent = 'Historial de ' + nombre;
+  document.getElementById('historialCargando').style.display = 'block';
+  document.getElementById('historialContenido').style.display = 'none';
+  document.getElementById('modalHistorial').classList.add('open');
+  document.getElementById('historialTabla').innerHTML = '';
+
+  fetch('clientes.php?ajax_historial=' + id)
+    .then(r => r.json())
+    .then(data => {
+      document.getElementById('historialCargando').style.display = 'none';
+      document.getElementById('historialContenido').style.display = 'block';
+      const tb = document.getElementById('historialTabla');
+      if (data.length === 0) {
+        tb.innerHTML = '<tr><td colspan="5" class="empty-row">No hay sesiones registradas.</td></tr>';
+      } else {
+        data.forEach(s => {
+          let tr = document.createElement('tr');
+          // Parse date properly to avoid timezone issues
+          let partesFecha = s.fecha_sesion.split('-');
+          let anio = parseInt(partesFecha[0], 10);
+          let mes = parseInt(partesFecha[1], 10); // 1-indexed
+          let dia = parseInt(partesFecha[2], 10);
+          
+          let mesStr = new Date(anio, mes - 1, dia).toLocaleDateString('es-ES', { month: 'short' });
+          let fechaStr = `${dia} ${mesStr} ${anio}`;
+          let horaStr = s.hora_sesion ? s.hora_sesion.substring(0, 5) : '—';
+          
+          let estadoPago = (s.estado_pago === 'pagado') ? '<span class="badge teal">Pagado</span>' : '<span class="badge">Pendiente</span>';
+          let estadoEntrega = (s.estado_entrega === 'entregado' || s.estado_entrega === 'entregada') ? '<span class="badge teal">Entregada</span>' : '<span class="badge">Pendiente</span>';
+          
+          let linkSesion = `sesiones.php?anio=${anio}&mes=${mes}&dia=${dia}&sesion_id=${s.id}`;
+          
+          tr.innerHTML = `
+            <td>
+              <div style="font-weight:700; color:var(--navy);">${fechaStr}</div>
+              <div style="font-size:10px; color:var(--text-dim);">${horaStr}</div>
+            </td>
+            <td style="font-weight:600;">${s.producto_nombre || 'Sesión General'}</td>
+            <td>${estadoPago}</td>
+            <td>${estadoEntrega}</td>
+            <td>
+              <a href="${linkSesion}" class="btn btn-ghost btn-sm">Ver en Calendario</a>
+            </td>
+          `;
+          tb.appendChild(tr);
+        });
+      }
+    })
+    .catch(e => {
+      document.getElementById('historialCargando').innerHTML = 'Error al cargar el historial.';
+    });
+}
+
 function confirmarEliminar(id, nombre) {
   if (confirm('¿Eliminar a ' + nombre + '?\nEsta acción no se puede deshacer.')) {
     document.getElementById('eliminarId').value = id;
@@ -416,9 +528,11 @@ function confirmarEliminar(id, nombre) {
   }
 }
 
-// Cerrar modal al hacer clic fuera
-document.getElementById('modalCliente').addEventListener('click', function(e) {
-  if (e.target === this) cerrarModal();
+// Cerrar modales al hacer clic fuera
+document.querySelectorAll('.modal-overlay').forEach(el => {
+  el.addEventListener('click', function(e) {
+    if (e.target === this) this.classList.remove('open');
+  });
 });
 
 // Abrir modal si venía con error (campo incompleto)
@@ -432,5 +546,5 @@ editarCliente(<?= json_encode($clienteEditar) ?>);
 <?php endif; ?>
 </script>
 
-</body>
+  </body>
 </html>
