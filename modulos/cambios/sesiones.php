@@ -346,7 +346,7 @@ if ($rSP) {
 
 $fechaIni = "$anioC-$mesC-01";
 $fechaFin = "$anioC-$mesC-$diasMes";
-$stmtCal  = $db->prepare("SELECT s.*,cl.nombre,cl.apellido,cl.telefono,p.nombre AS servicio FROM sesiones s JOIN clientes cl ON s.cliente_id=cl.id LEFT JOIN productos p ON s.producto_id=p.id WHERE s.fecha_sesion BETWEEN ? AND ? ORDER BY s.fecha_sesion, s.hora_sesion, s.id");
+$stmtCal  = $db->prepare("SELECT s.*,cl.nombre,cl.apellido,p.nombre AS servicio FROM sesiones s JOIN clientes cl ON s.cliente_id=cl.id LEFT JOIN productos p ON s.producto_id=p.id WHERE s.fecha_sesion BETWEEN ? AND ? ORDER BY s.fecha_sesion, s.hora_sesion, s.id");
 $stmtCal->bind_param("ss", $fechaIni, $fechaFin);
 $stmtCal->execute();
 $sesionesCalendario = [];
@@ -425,22 +425,7 @@ $stmtL->close();
 
 // Datos completos para que Editar funcione desde calendario y listado sin depender del onclick.
 $sesionesParaJS = [];
-// Incluye la factura vinculada (facturas.sesion_id). Si hubiera más de una, se toma la más reciente.
-try {
-$rJS = $db->query("SELECT s.*,cl.nombre,cl.apellido,cl.telefono,p.nombre AS servicio,
-        fv.id AS factura_id, fv.numero_factura AS factura_numero, fv.total AS factura_total,
-        fv.abono AS factura_abono, fv.estado AS factura_estado
-    FROM sesiones s
-    JOIN clientes cl ON s.cliente_id=cl.id
-    LEFT JOIN productos p ON s.producto_id=p.id
-    LEFT JOIN (SELECT sesion_id, MAX(id) AS fid FROM facturas WHERE sesion_id IS NOT NULL GROUP BY sesion_id) fx ON fx.sesion_id=s.id
-    LEFT JOIN facturas fv ON fv.id=fx.fid
-    ORDER BY s.fecha_sesion DESC, s.hora_sesion DESC, s.id DESC");
-} catch (Throwable $e) { $rJS = false; }
-if (!$rJS) {
-    // Respaldo: si la consulta con facturas fallara, se usa la consulta original para no romper Editar.
-    $rJS = $db->query("SELECT s.*,cl.nombre,cl.apellido,cl.telefono,p.nombre AS servicio FROM sesiones s JOIN clientes cl ON s.cliente_id=cl.id LEFT JOIN productos p ON s.producto_id=p.id ORDER BY s.fecha_sesion DESC, s.hora_sesion DESC, s.id DESC");
-}
+$rJS = $db->query("SELECT s.*,cl.nombre,cl.apellido,cl.telefono,p.nombre AS servicio FROM sesiones s JOIN clientes cl ON s.cliente_id=cl.id LEFT JOIN productos p ON s.producto_id=p.id ORDER BY s.fecha_sesion DESC, s.hora_sesion DESC, s.id DESC");
 if ($rJS) {
     while ($rowJS = $rJS->fetch_assoc()) {
         $sidJS = (int)$rowJS['id'];
@@ -807,7 +792,6 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
                       </form>
                       <span class="status-pill pill-<?= $se['estado_pago'] ?>"><?= ucfirst($se['estado_pago']) ?></span>
                       <button class="btn btn-teal btn-sm" onclick="event.stopPropagation();abrirGaleria(<?= $se['id'] ?>, '<?= htmlspecialchars($se['nombre']) ?>')">📷 Fotos</button>
-                      <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();abrirModalFactura(<?= $se['id'] ?>)">🧾 Factura</button>
                       <button class="btn btn-ghost btn-sm" onclick="event.stopPropagation();editarSesionPorId(<?= $se['id'] ?>)">Editar</button>
                       <button class="btn btn-danger btn-sm" onclick="event.stopPropagation();confirmarEliminar(<?= $se['id'] ?>,'<?= htmlspecialchars($se['nombre']) ?>')">Eliminar</button>
                     </div>
@@ -979,7 +963,6 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
             <td>
               <div style="display:flex;gap:5px;flex-wrap:wrap;">
                 <button class="btn btn-teal btn-sm" onclick="abrirGaleria(<?= $s['id'] ?>,'<?= htmlspecialchars($s['nombre'].' '.$s['apellido']) ?>')">📷</button>
-                <button class="btn btn-ghost btn-sm" onclick="abrirModalFactura(<?= (int)$s['id'] ?>)">🧾</button>
                 <button class="btn btn-ghost btn-sm" onclick="editarSesionPorId(<?= (int)$s['id'] ?>)">Editar</button>
                 <button class="btn btn-danger btn-sm" onclick="confirmarEliminar(<?= $s['id'] ?>,'<?= htmlspecialchars($s['nombre'].' '.$s['apellido']) ?>')">Eliminar</button>
               </div>
@@ -1189,199 +1172,14 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
   <input type="hidden" name="foto_id" id="elimFotoId">
 </form>
 
-<!-- MODAL FACTURA (muestra el PDF original del módulo Facturas) -->
-<style>
-.fac-modal{max-width:880px;width:95vw;display:flex;flex-direction:column;overflow:hidden;}
-.fac-meta{display:flex;align-items:center;gap:8px;margin-left:12px;flex-wrap:wrap;}
-.fac-num{font-size:12px;font-weight:700;color:var(--navy-mid);background:var(--navy-soft);border-radius:20px;padding:3px 10px;}
-.fac-visor{position:relative;background:#eceaf0;height:68vh;}
-.fac-visor iframe{width:100%;height:100%;border:0;display:block;background:#eceaf0;}
-.fac-cargando{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:10px;color:var(--text-mid);font-size:13px;pointer-events:none;}
-.fac-spinner{width:30px;height:30px;border-radius:50%;border:3px solid var(--rose-pale);border-top-color:var(--rose);animation:facGiro .8s linear infinite;}
-@keyframes facGiro{to{transform:rotate(360deg)}}
-.fac-vacia{height:auto;padding:46px 24px;text-align:center;color:var(--text-mid);font-size:14px;line-height:1.6;background:var(--surface);}
-.fac-vacia .fac-ico{font-size:40px;margin-bottom:8px;}
-.btn-wa{background:linear-gradient(135deg,#25d366,#128c7e);color:#fff;box-shadow:0 4px 14px rgba(18,140,126,.28);}
-.btn-wa:hover{transform:translateY(-1px);}
-.fac-aviso{display:none;margin-right:auto;align-self:center;font-size:12px;color:var(--teal-deep);background:var(--teal-pale);border:1.5px solid var(--teal-light);border-radius:10px;padding:6px 10px;line-height:1.4;}
-.fac-aviso.show{display:block;animation:fadeUp .3s ease both;}
-.fac-aviso.warn{color:#9a5b12;background:#fef3e2;border-color:#f3d19e;}
-@media(max-width:640px){.fac-visor{height:60vh}.fac-aviso{margin-right:0;width:100%}.modal-footer{flex-wrap:wrap}}
-</style>
-<div class="modal-overlay" id="modalFactura" style="z-index:115;" onclick="if(event.target===this)cerrarModalFactura()">
-  <div class="modal fac-modal">
-    <div class="modal-header">
-      <span class="modal-title" style="flex:0 0 auto;">Factura de la sesión</span>
-      <div class="fac-meta">
-        <span class="fac-num" id="facNumero"></span>
-        <span class="status-pill" id="facEstado"></span>
-      </div>
-      <span style="flex:1;"></span>
-      <button type="button" class="modal-close" onclick="cerrarModalFactura()">✕</button>
-    </div>
-
-    <div class="fac-visor" id="facVisor">
-      <div class="fac-cargando" id="facCargando"><div class="fac-spinner"></div>Cargando factura…</div>
-      <iframe id="facIframe" title="Factura PDF"></iframe>
-    </div>
-
-    <div class="fac-visor fac-vacia" id="facVacia" style="display:none;">
-      <div class="fac-ico">🧾</div>
-      <strong>Esta sesión no tiene una factura vinculada.</strong><br>
-      Puedes crearla desde el módulo <a href="facturas.php" style="color:var(--rose-deep);font-weight:700;">Facturas</a> seleccionando esta sesión.
-    </div>
-
-    <div class="modal-footer" id="facAcciones">
-      <div class="fac-aviso" id="facAviso"></div>
-      <a class="btn btn-ghost" id="facDescargar" href="#">⬇ Descargar PDF</a>
-      <button type="button" class="btn btn-wa" id="btnEnviarWhatsApp">
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="margin-right:6px;"><path d="M17.47 14.38c-.3-.15-1.75-.86-2.02-.96-.27-.1-.47-.15-.67.15-.2.3-.77.96-.94 1.16-.17.2-.35.22-.64.07-.3-.15-1.25-.46-2.38-1.47-.88-.78-1.47-1.75-1.64-2.05-.17-.3-.02-.46.13-.6.13-.13.3-.35.45-.52.15-.17.2-.3.3-.5.1-.2.05-.37-.02-.52-.08-.15-.67-1.6-.92-2.2-.24-.58-.49-.5-.67-.5h-.57c-.2 0-.52.07-.79.37-.27.3-1.04 1.02-1.04 2.48s1.07 2.88 1.21 3.08c.15.2 2.1 3.2 5.08 4.49.71.31 1.26.49 1.7.63.71.23 1.36.2 1.87.12.57-.08 1.75-.72 2-1.41.25-.69.25-1.29.17-1.41-.07-.12-.27-.2-.57-.35M12.05 21.5h-.01a9.4 9.4 0 0 1-4.8-1.32l-.34-.2-3.57.94.95-3.48-.22-.36a9.4 9.4 0 0 1-1.44-5.02c0-5.2 4.24-9.43 9.44-9.43 2.52 0 4.89.98 6.67 2.77a9.37 9.37 0 0 1 2.76 6.67c0 5.2-4.23 9.43-9.44 9.43m8.03-17.46A11.27 11.27 0 0 0 12.05.72C5.8.72.7 5.8.7 12.07c0 2 .52 3.95 1.52 5.67L.6 23.62l6.02-1.58a11.33 11.33 0 0 0 5.42 1.38h.01c6.26 0 11.35-5.09 11.35-11.35 0-3.03-1.18-5.88-3.32-8.03"/></svg>
-        Enviar por WhatsApp
-      </button>
-    </div>
-  </div>
-</div>
-
 <script>
 const productosData = <?php
   $todosProductos->data_seek(0); $prods=[];
   while($pr=$todosProductos->fetch_assoc()) $prods[]=$pr;
-  echo json_encode($prods, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE) ?: '[]';
+  echo json_encode($prods, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 ?>;
-const sesionesData = <?php echo json_encode($sesionesParaJS, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES | JSON_INVALID_UTF8_SUBSTITUTE) ?: '[]'; ?>;
+const sesionesData = <?php echo json_encode($sesionesParaJS, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES); ?>;
 const UPLOAD_URL = '<?= UPLOAD_URL ?>';
-
-// ── Factura (PDF original) + WhatsApp ──
-function formatoFechaCorta(f){
-  const p = String(f||'').split('-');
-  return p.length === 3 ? p[2] + '/' + p[1] + '/' + p[0] : String(f||'');
-}
-function telefonoWhatsApp(tel){
-  // Solo dígitos; si es un celular colombiano de 10 dígitos se antepone el indicativo 57.
-  let t = String(tel || '').replace(/[^0-9]/g, '');
-  if (t.length === 10 && t.charAt(0) === '3') t = '57' + t;
-  return t;
-}
-function abrirModalFactura(id) {
-  const s = sesionesData.find(x => Number(x.id) === Number(id));
-  if(!s) return;
-
-  const visor    = document.getElementById('facVisor');
-  const vacia    = document.getElementById('facVacia');
-  const acciones = document.getElementById('facAcciones');
-  const iframe   = document.getElementById('facIframe');
-  const cargando = document.getElementById('facCargando');
-  const numero   = document.getElementById('facNumero');
-  const pill     = document.getElementById('facEstado');
-  document.getElementById('facAviso').classList.remove('show');
-
-  // Sesión sin factura vinculada
-  if (!s.factura_id) {
-    numero.style.display = 'none';
-    pill.style.display = 'none';
-    visor.style.display = 'none';
-    acciones.style.display = 'none';
-    vacia.style.display = 'block';
-    iframe.src = 'about:blank';
-    document.getElementById('modalFactura').classList.add('open');
-    return;
-  }
-
-  const estadoFac = String(s.factura_estado || s.estado_pago || 'pendiente');
-  numero.textContent = s.factura_numero || '';
-  numero.style.display = s.factura_numero ? '' : 'none';
-  pill.className = 'status-pill pill-' + estadoFac;
-  pill.textContent = estadoFac.charAt(0).toUpperCase() + estadoFac.slice(1);
-  pill.style.display = '';
-  vacia.style.display = 'none';
-  visor.style.display = '';
-  acciones.style.display = '';
-
-  // Mismo PDF que genera el módulo Facturas (factura_pdf.php)
-  const urlPdf = 'factura_pdf.php?id=' + encodeURIComponent(s.factura_id);
-  const nombreArchivo = 'Factura_' + String(s.factura_numero || s.factura_id).replace(/[^A-Za-z0-9\-]/g, '_') + '.pdf';
-  cargando.style.display = 'flex';
-  iframe.onload = function(){ cargando.style.display = 'none'; };
-  iframe.src = urlPdf + '&ver=1';
-
-  const btnDesc = document.getElementById('facDescargar');
-  btnDesc.href = urlPdf;
-  btnDesc.setAttribute('download', nombreArchivo);
-
-  // Mensaje para WhatsApp con los datos de la factura
-  const nombre  = (String(s.nombre || '') + ' ' + String(s.apellido || '')).trim();
-  const total   = Number(s.factura_total ?? s.total ?? 0);
-  const abono   = Number(s.factura_abono ?? s.abono ?? 0);
-  const saldo   = Math.max(0, total - abono);
-  const lineas  = [
-    'Hola ' + (s.nombre || '') + ', te saludamos de *Liz Fotografía* 📸',
-    '',
-    'Te compartimos la factura *' + (s.factura_numero || '') + '* de tu sesión' + (s.fecha_sesion ? ' del ' + formatoFechaCorta(s.fecha_sesion) : '') + '.',
-    '',
-    '*Servicio:* ' + (s.servicio || 'Por definir'),
-    '*Total:* ' + formatoPrecio(total),
-    '*Abono:* ' + formatoPrecio(abono),
-    '*Saldo pendiente:* ' + formatoPrecio(saldo),
-    '*Estado:* ' + pill.textContent,
-    '',
-    'Adjuntamos el PDF de la factura. ¡Gracias por tu preferencia! 💖'
-  ];
-  const mensaje = lineas.join('\n');
-
-  // ── Opción B: compartir el PDF con el panel "Compartir" del sistema (Web Share API) ──
-  // Se descarga el PDF en memoria apenas se abre el panel, para que al hacer clic se comparta al instante
-  // (los navegadores exigen que la acción de compartir ocurra justo después del clic).
-  const aviso = document.getElementById('facAviso');
-  const btnWA = document.getElementById('btnEnviarWhatsApp');
-  const soportaCompartir = window.isSecureContext && typeof navigator.share === 'function' && typeof navigator.canShare === 'function';
-  let archivoPdf = null;
-  const promesaPdf = soportaCompartir
-    ? fetch(urlPdf, { credentials: 'same-origin' })
-        .then(r => {
-          const tipo = r.headers.get('Content-Type') || '';
-          if (!r.ok || tipo.indexOf('pdf') === -1) throw new Error('No se pudo obtener el PDF');
-          return r.blob();
-        })
-        .then(b => (archivoPdf = new File([b], nombreArchivo, { type: 'application/pdf' })))
-        .catch(() => null)
-    : Promise.resolve(null);
-
-  btnWA.onclick = async function() {
-    if (!soportaCompartir) {
-      mostrarAvisoFactura('warn', '⚠️ Este navegador o esta dirección no permiten compartir archivos. Funciona en Chrome/Edge entrando por <strong>localhost</strong> o <strong>https://</strong>. Usa ⬇ Descargar PDF.');
-      return;
-    }
-    const archivo = archivoPdf || await promesaPdf;
-    if (!archivo) {
-      mostrarAvisoFactura('warn', '⚠️ No se pudo preparar el PDF. Usa ⬇ Descargar PDF.');
-      return;
-    }
-    if (!navigator.canShare({ files: [archivo] })) {
-      mostrarAvisoFactura('warn', '⚠️ Este equipo no permite compartir archivos PDF. Usa ⬇ Descargar PDF.');
-      return;
-    }
-    // Algunas apps ignoran el texto cuando se comparte un archivo: se copia al portapapeles por si acaso.
-    try { await navigator.clipboard.writeText(mensaje); } catch (e) {}
-    try {
-      await navigator.share({ files: [archivo], title: 'Factura ' + (s.factura_numero || ''), text: mensaje });
-      mostrarAvisoFactura('ok', '✅ Factura compartida. Si el mensaje no apareció en WhatsApp, pégalo con <strong>Ctrl + V</strong>.');
-    } catch (e) {
-      if (e && e.name === 'AbortError') return; // la persona cerró el panel de compartir
-      mostrarAvisoFactura('warn', '⚠️ No se pudo abrir el panel de compartir (' + escapeHtml(e && e.message ? e.message : 'error') + '). Usa ⬇ Descargar PDF.');
-    }
-  };
-
-  document.getElementById('modalFactura').classList.add('open');
-}
-function cerrarModalFactura() {
-  document.getElementById('modalFactura').classList.remove('open');
-  document.getElementById('facIframe').src = 'about:blank';
-}
-function mostrarAvisoFactura(tipo, html) {
-  const aviso = document.getElementById('facAviso');
-  aviso.className = 'fac-aviso show' + (tipo === 'warn' ? ' warn' : '');
-  aviso.innerHTML = html;
-}
 
 // ── Buscador de clientes ──
 function filtrarClientes(inputId, dropdownId, hiddenId){

@@ -511,9 +511,5 @@ $mpdf->SetCreator(SITE_NAME);
 $mpdf->WriteHTML($html);
 
 $nombreArchivo = 'Factura_' . preg_replace('/[^A-Za-z0-9\-]/', '_', $f['numero_factura']) . '.pdf';
-// ?ver=1 → mostrar dentro del navegador (panel de Sesiones). Sin el parámetro se descarga como siempre.
-$destinoPdf = (isset($_GET['ver']) && $_GET['ver'] === '1')
-    ? \Mpdf\Output\Destination::INLINE
-    : \Mpdf\Output\Destination::DOWNLOAD;
-$mpdf->Output($nombreArchivo, $destinoPdf);
+$mpdf->Output($nombreArchivo, \Mpdf\Output\Destination::DOWNLOAD);
 exit;

@@ -103,8 +103,9 @@ $avClasses    = ['av-a','av-b','av-c','av-d','av-e'];
 <link href="https://fonts.googleapis.com/css2?family=Dancing+Script:wght@400;600;700&family=Nunito:wght@300;400;600;700&display=swap" rel="stylesheet">
 <style>
   :root{--bg:#faf8f6;--surface:#fff;--surface2:#fdf5f8;--navy:#1a1f3c;--navy-mid:#2d3460;--navy-soft:#e8eaf6;--rose:#e8789a;--rose-light:#f5b8ce;--rose-pale:#fce8f0;--rose-deep:#c4547a;--teal:#5bbcb8;--teal-light:#9ddbd8;--teal-pale:#e0f5f4;--teal-deep:#3a9994;--lavender:#9e8bc9;--lav-light:#c5b8e8;--lav-pale:#f0ecfb;--text:#2a2040;--text-mid:#6b5e7a;--text-dim:#a899b5;--border:#ede0ea;--sidebar-w:230px;--shadow-sm:0 2px 8px rgba(180,120,160,.10);--shadow-md:0 4px 20px rgba(180,120,160,.15);}
-  *{margin:0;padding:0;box-sizing:border-box;}
-  body{font-family:'Nunito',sans-serif;background:var(--bg);color:var(--text);display:flex;height:100vh;overflow:hidden;font-size:13px;}
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; padding: 0; box-sizing: border-box; }
+  body{font-family:'Nunito',sans-serif;background:var(--bg);color:var(--text);display:flex;overflow:hidden;font-size:13px;}
   .sidebar{width:var(--sidebar-w);background:var(--navy);display:flex;flex-direction:column;flex-shrink:0;height:100%;position:relative;overflow:hidden;}
   .sidebar::before{content:'';position:absolute;width:180px;height:180px;border-radius:50%;background:radial-gradient(circle,rgba(232,120,154,.18) 0%,transparent 70%);top:-40px;right:-50px;pointer-events:none;}
   .sidebar::after{content:'';position:absolute;width:140px;height:140px;border-radius:50%;background:radial-gradient(circle,rgba(91,188,184,.15) 0%,transparent 70%);bottom:60px;left:-30px;pointer-events:none;}
@@ -140,9 +141,12 @@ $avClasses    = ['av-a','av-b','av-c','av-d','av-e'];
   .btn-ghost{background:transparent;color:var(--text-mid);border:1.5px solid var(--border);}
   .btn-ghost:hover{border-color:var(--rose-light);color:var(--rose-deep);}
   .btn svg{width:14px;height:14px;}
-  .content{flex:1;overflow-y:auto;overflow-x:auto;padding:22px 26px;display:flex;flex-direction:column;gap:18px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;}
-  .content::-webkit-scrollbar{width:4px;}
-  .content::-webkit-scrollbar-thumb{background:var(--rose-light);border-radius:2px;}
+  .content{flex:1;min-height:0;overflow-y:auto;overflow-x:auto;padding:22px 26px;display:block;scrollbar-width:thin;scrollbar-color:var(--border) transparent;}
+  .content > * { margin-bottom: 18px; }
+  .content > *:last-child { margin-bottom: 0; }
+  .content::-webkit-scrollbar{width:8px;height:8px;}
+  .content::-webkit-scrollbar-track{background:rgba(0,0,0,0.03);border-radius:4px;}
+  .content::-webkit-scrollbar-thumb{background:var(--rose-light);border-radius:4px;}
 
   /* STATS */
   .stats-row{display:grid;grid-template-columns:repeat(5,minmax(150px,1fr));gap:14px;min-width:0;}
@@ -331,7 +335,7 @@ $avClasses    = ['av-a','av-b','av-c','av-d','av-e'];
                   </div>
                 </div>
               </td>
-              <td><?= htmlspecialchars($ses['servicio'] ?? '—') ?></td>
+              <td><?= htmlspecialchars($ses['servicio'] ?? 'Por definir') ?></td>
               <td style="font-size:11px;font-weight:600;"><?= formatoFecha($ses['fecha_sesion']) ?></td>
               <td><span class="status-pill pill-<?= $ses['estado_pago'] ?>"><?= ucfirst($ses['estado_pago']) ?></span></td>
               <td><span class="status-pill pill-<?= $ses['estado_entrega'] ?>"><?= ucfirst(str_replace('_',' ',$ses['estado_entrega'])) ?></span></td>

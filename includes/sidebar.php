@@ -32,7 +32,7 @@ if ($r && $row = $r->fetch_assoc()) {
 <aside class="sidebar">
 <div class="logo-area">
     <div class="logo-circle">
-        <img src="<?= SITE_URL ?>/uploads/logo.jpg" alt="Logo">
+        <img src="<?= SITE_URL ?>/uploads/perfiles/logo.jpg" alt="Logo">
     </div>
     <div class="logo-name">Lizdy Pineda</div>
     <div class="logo-sub">Fotoestudio</div>
