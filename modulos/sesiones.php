@@ -7,21 +7,56 @@ $db = getDB();
 $mensaje = '';
 $error   = '';
 
+// ── Auto-asegurar columnas para grupos de fotos y abonos ──
+function asegurarColumna($db, $tabla, $columna, $def) {
+    $r = $db->query("SHOW COLUMNS FROM `$tabla` LIKE '$columna'");
+    if ($r && $r->num_rows === 0) {
+        $db->query("ALTER TABLE `$tabla` ADD COLUMN `$columna` $def");
+    }
+}
+asegurarColumna($db, 'ingresos', 'sesion_id', 'INT NULL AFTER factura_id');
+asegurarColumna($db, 'sesion_fotos', 'categoria', "VARCHAR(100) NOT NULL DEFAULT 'sesion' AFTER sesion_id");
+asegurarColumna($db, 'sesion_fotos', 'grupo_desc', 'VARCHAR(255) NULL AFTER categoria');
+
+// ── Sincronización segura de enlaces contables existentes ──
+function autoSincronizarAbonos($db) {
+    // 1. Vincular ingresos que ya tengan factura_id explícita a la sesión de esa factura (excepto filas históricas desvinculadas)
+    $db->query("UPDATE ingresos i JOIN facturas f ON i.factura_id = f.id SET i.sesion_id = f.sesion_id WHERE i.sesion_id IS NULL AND f.sesion_id IS NOT NULL AND i.id NOT IN (19, 21, 27, 36)");
+
+    // 2. Mapeo seguro e idempotente de abonos históricos originales (sin borrados y sin duplicados)
+    $db->query("UPDATE ingresos SET sesion_id = 12, factura_id = 12 WHERE id = 17 AND sesion_id IS NULL");
+    $db->query("UPDATE ingresos SET sesion_id = 32, factura_id = 32 WHERE id = 18 AND sesion_id IS NULL");
+    $db->query("UPDATE ingresos SET sesion_id = 16, factura_id = 16 WHERE id = 20 AND sesion_id IS NULL");
+    $db->query("UPDATE ingresos SET sesion_id = 14, factura_id = 14 WHERE id = 22 AND sesion_id IS NULL");
+    $db->query("UPDATE ingresos SET sesion_id = 57, factura_id = 57 WHERE id IN (23, 28) AND sesion_id IS NULL");
+    $db->query("UPDATE ingresos SET sesion_id = 19, factura_id = 19 WHERE id = 24 AND sesion_id IS NULL");
+    $db->query("UPDATE ingresos SET sesion_id = 18, factura_id = 18 WHERE id IN (25, 26) AND sesion_id IS NULL");
+    $db->query("UPDATE ingresos SET sesion_id = 71, factura_id = 71 WHERE id = 29 AND sesion_id IS NULL");
+    $db->query("UPDATE ingresos SET sesion_id = 29, factura_id = 29 WHERE id = 30 AND sesion_id IS NULL");
+    $db->query("UPDATE ingresos SET sesion_id = 72, factura_id = 72 WHERE id = 31 AND sesion_id IS NULL");
+    $db->query("UPDATE ingresos SET sesion_id = 56, factura_id = 56 WHERE id = 32 AND sesion_id IS NULL");
+    $db->query("UPDATE ingresos SET sesion_id = 13, factura_id = 13 WHERE id = 33 AND sesion_id IS NULL");
+    $db->query("UPDATE ingresos SET sesion_id = 17, factura_id = 17 WHERE id = 34 AND sesion_id IS NULL");
+    $db->query("UPDATE ingresos SET sesion_id = 47, factura_id = 47 WHERE id = 35 AND sesion_id IS NULL");
+    $db->query("UPDATE ingresos SET sesion_id = 73, factura_id = 73 WHERE id = 37 AND sesion_id IS NULL");
+    $db->query("UPDATE ingresos SET sesion_id = 74, factura_id = 74 WHERE id = 38 AND sesion_id IS NULL");
+    $db->query("UPDATE ingresos SET sesion_id = 70, factura_id = 70 WHERE id = 39 AND sesion_id IS NULL");
+}
+autoSincronizarAbonos($db);
+
+
 if (isset($_GET['accion_galeria'])) {
     $sid = sanitizeInt($_GET['sesion_id'] ?? 0);
     $rows = [];
-
     if ($sid) {
-        $r = $db->query("SELECT id, archivo, descripcion
+        $r = $db->query("SELECT id, archivo, descripcion, categoria, grupo_desc
                          FROM sesion_fotos
                          WHERE sesion_id=$sid
                          ORDER BY fecha_subida DESC");
-
         while ($row = $r->fetch_assoc()) {
             $rows[] = $row;
         }
     }
-
     header('Content-Type: application/json');
     echo json_encode($rows);
     exit;
@@ -152,24 +187,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $sfac->bind_param("ddssi", $total, $abono, $metodo_pago, $estadoFac, $id);
                 $sfac->execute(); $sfac->close();
 
+                // Obtenemos factura_id vinculada para enlazar los ingresos contables
+                $rfId = $db->query("SELECT id FROM facturas WHERE sesion_id=$id LIMIT 1");
+                $facIdVinculada = ($rfId && $rowF = $rfId->fetch_assoc()) ? (int)$rowF['id'] : null;
+
                 // Si cambió a pagado, registrar ingreso automático.
                 if ($prev && $prev['estado_pago'] !== 'pagado' && $estado_pago === 'pagado') {
                     $montoIngreso = $total - (float)$prev['abono'];
                     if ($montoIngreso > 0) {
-                        $concepto  = "Pago sesión – " . date('d/m/Y', strtotime($fecha_sesion));
+                        $rCount = $db->query("SELECT COUNT(*) as t FROM ingresos WHERE (sesion_id=$id" . ($facIdVinculada ? " OR factura_id=$facIdVinculada" : "") . ") AND tipo='ingreso'");
+                        $numAb = ($rCount ? (int)$rCount->fetch_assoc()['t'] : 0) + 1;
+                        $concepto  = "Pago saldo final (#$numAb) – " . date('d/m/Y', strtotime($fecha_sesion));
                         $fecha_hoy = $fecha_sesion;
-                        $si = $db->prepare("INSERT INTO ingresos (cliente_id, concepto, monto, tipo, metodo_pago, fecha) VALUES (?,?,?,'ingreso',?,?)");
-                        $si->bind_param("isdss", $cliente_id, $concepto, $montoIngreso, $metodo_pago, $fecha_hoy);
+                        $si = $db->prepare("INSERT INTO ingresos (sesion_id, factura_id, cliente_id, concepto, monto, tipo, metodo_pago, fecha) VALUES (?,?,?,?,?,'ingreso',?,?)");
+                        $si->bind_param("iiisdss", $id, $facIdVinculada, $cliente_id, $concepto, $montoIngreso, $metodo_pago, $fecha_hoy);
                         $si->execute(); $si->close();
                     }
                 }
                 // Si el abono aumentó, registrar la diferencia.
                 if ($prev && $abono > (float)$prev['abono']) {
                     $diff = $abono - (float)$prev['abono'];
-                    $concepto  = "Abono sesión – " . date('d/m/Y', strtotime($fecha_sesion));
+                    $rCount = $db->query("SELECT COUNT(*) as t FROM ingresos WHERE (sesion_id=$id" . ($facIdVinculada ? " OR factura_id=$facIdVinculada" : "") . ") AND tipo='ingreso'");
+                    $numAb = ($rCount ? (int)$rCount->fetch_assoc()['t'] : 0) + 1;
+                    $concepto  = "Abono #$numAb sesión – " . date('d/m/Y', strtotime($fecha_sesion));
                     $fecha_hoy = $fecha_sesion;
-                    $si = $db->prepare("INSERT INTO ingresos (cliente_id, concepto, monto, tipo, metodo_pago, fecha) VALUES (?,?,?,'ingreso',?,?)");
-                    $si->bind_param("isdss", $cliente_id, $concepto, $diff, $metodo_pago, $fecha_hoy);
+                    $si = $db->prepare("INSERT INTO ingresos (sesion_id, factura_id, cliente_id, concepto, monto, tipo, metodo_pago, fecha) VALUES (?,?,?,?,?,'ingreso',?,?)");
+                    $si->bind_param("iiisdss", $id, $facIdVinculada, $cliente_id, $concepto, $diff, $metodo_pago, $fecha_hoy);
                     $si->execute(); $si->close();
                 }
                 $mensaje = 'Sesión actualizada correctamente.';
@@ -196,13 +239,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $estadoFac = ($total > 0 && $abono >= $total) ? 'pagada' : ($abono > 0 ? 'abonada' : 'pendiente');
                 $sfac = $db->prepare("INSERT INTO facturas (sesion_id, cliente_id, numero_factura, total, abono, metodo_pago, estado) VALUES (?,?,?,?,?,?,?)");
                 $sfac->bind_param("iisddss", $nuevaSesionId, $cliente_id, $numero_factura, $total, $abono, $metodo_pago, $estadoFac);
-                $sfac->execute(); $sfac->close();
+                $sfac->execute();
+                $nuevaFacturaId = $sfac->insert_id;
+                $sfac->close();
 
                 if ($abono > 0) {
-                    $concepto  = ($estado_pago === 'pagado' ? "Pago sesión – " : "Abono sesión – ") . date('d/m/Y', strtotime($fecha_sesion));
+                    $concepto  = ($estado_pago === 'pagado' ? "Pago sesión – " : "Abono #1 sesión – ") . date('d/m/Y', strtotime($fecha_sesion));
                     $fecha_hoy = $fecha_sesion;
-                    $si = $db->prepare("INSERT INTO ingresos (cliente_id, concepto, monto, tipo, metodo_pago, fecha) VALUES (?,?,?,'ingreso',?,?)");
-                    $si->bind_param("isdss", $cliente_id, $concepto, $abono, $metodo_pago, $fecha_hoy);
+                    $si = $db->prepare("INSERT INTO ingresos (sesion_id, factura_id, cliente_id, concepto, monto, tipo, metodo_pago, fecha) VALUES (?,?,?,?,?,'ingreso',?,?)");
+                    $si->bind_param("iiisdss", $nuevaSesionId, $nuevaFacturaId, $cliente_id, $concepto, $abono, $metodo_pago, $fecha_hoy);
                     $si->execute(); $si->close();
                 }
                 $mensaje = 'Sesión registrada correctamente.';
@@ -221,10 +266,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    // ── Subir fotos ──
+    // ── Subir fotos con categorías y grupos ──
     if ($accion === 'subir_fotos') {
-        $sesion_id = sanitizeInt($_POST['sesion_id'] ?? 0);
+        $sesion_id   = sanitizeInt($_POST['sesion_id'] ?? 0);
+        $categoria   = sanitize($_POST['categoria'] ?? 'sesion');
+        if (empty($categoria)) $categoria = 'sesion';
+        $grupo_desc  = sanitize($_POST['grupo_desc'] ?? '');
         $descripcion = sanitize($_POST['descripcion'] ?? '');
+
         if ($sesion_id && isset($_FILES['fotos'])) {
             $subidos = 0;
             $files = $_FILES['fotos'];
@@ -237,13 +286,109 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $dest = $uploadDir . $nombre;
                 if (move_uploaded_file($files['tmp_name'][$f], $dest)) {
                     $rel = 'sesiones/' . $nombre;
-                    $st = $db->prepare("INSERT INTO sesion_fotos (sesion_id, archivo, descripcion) VALUES (?,?,?)");
-                    $st->bind_param("iss", $sesion_id, $rel, $descripcion);
+                    $st = $db->prepare("INSERT INTO sesion_fotos (sesion_id, categoria, grupo_desc, archivo, descripcion) VALUES (?,?,?,?,?)");
+                    $st->bind_param("issss", $sesion_id, $categoria, $grupo_desc, $rel, $descripcion);
                     $st->execute(); $st->close();
                     $subidos++;
                 }
             }
-            $mensaje = "$subidos foto(s) subida(s) correctamente.";
+            $mensaje = "$subidos foto(s) subida(s) correctamente al grupo seleccionado.";
+        }
+    }
+
+    // ── Registrar nuevo abono ordenado en sesión ──
+    if ($accion === 'registrar_abono_sesion') {
+        $sesion_id   = sanitizeInt($_POST['sesion_id'] ?? 0);
+        $monto       = floatval($_POST['monto'] ?? 0);
+        $metodo_pago = sanitize($_POST['metodo_pago'] ?? 'efectivo');
+        $fecha_abono = sanitize($_POST['fecha'] ?? date('Y-m-d'));
+        $notas_abono = sanitize($_POST['notas'] ?? '');
+
+        if ($sesion_id > 0 && $monto > 0) {
+            $rS = $db->query("SELECT s.cliente_id, s.total, s.abono, s.fecha_sesion, s.metodo_pago, f.id AS factura_id, f.numero_factura 
+                              FROM sesiones s 
+                              LEFT JOIN facturas f ON f.sesion_id = s.id 
+                              WHERE s.id=$sesion_id");
+            if ($rS && $rowS = $rS->fetch_assoc()) {
+                $cliente_id = (int)$rowS['cliente_id'];
+                $totalS     = (float)$rowS['total'];
+                $facId      = !empty($rowS['factura_id']) ? (int)$rowS['factura_id'] : null;
+
+                // Contar cuántos abonos ya existen registrados en ingresos
+                $rCount = $db->query("SELECT COUNT(*) as t FROM ingresos WHERE (sesion_id=$sesion_id" . ($facId ? " OR factura_id=$facId" : "") . ") AND tipo='ingreso'");
+                $numExistentes = ($rCount ? (int)$rCount->fetch_assoc()['t'] : 0);
+
+                // Si la sesión ya tenía un abono registrado previamente pero aún no existía fila individual en ingresos:
+                $abonoPrevio = (float)($rowS['abono'] ?? 0);
+                if ($numExistentes === 0 && $abonoPrevio > 0) {
+                    $fechaIni    = !empty($rowS['fecha_sesion']) ? $rowS['fecha_sesion'] : date('Y-m-d');
+                    $metodoIni   = !empty($rowS['metodo_pago']) ? $rowS['metodo_pago'] : 'efectivo';
+                    $conceptoIni = "Abono #1 sesión – " . date('d/m/Y', strtotime($fechaIni));
+                    $notasIni    = "Abono inicial registrado con la sesión";
+                    $stIni = $db->prepare("INSERT INTO ingresos (sesion_id, factura_id, cliente_id, concepto, monto, tipo, metodo_pago, fecha, notas) VALUES (?,?,?,?,?,'ingreso',?,?,?)");
+                    $stIni->bind_param("iiisdsss", $sesion_id, $facId, $cliente_id, $conceptoIni, $abonoPrevio, $metodoIni, $fechaIni, $notasIni);
+                    $stIni->execute();
+                    $stIni->close();
+                    $numExistentes = 1;
+                }
+
+                $numAbono = $numExistentes + 1;
+                $concepto = "Abono #$numAbono sesión – " . date('d/m/Y', strtotime($fecha_abono));
+
+                $si = $db->prepare("INSERT INTO ingresos (sesion_id, factura_id, cliente_id, concepto, monto, tipo, metodo_pago, fecha, notas) VALUES (?,?,?,?,?,'ingreso',?,?,?)");
+                $si->bind_param("iiisdsss", $sesion_id, $facId, $cliente_id, $concepto, $monto, $metodo_pago, $fecha_abono, $notas_abono);
+                $si->execute(); $si->close();
+
+                // Recalcular abono total acumulado desde ingresos
+                $rSum = $db->query("SELECT COALESCE(SUM(monto),0) as sum_abono FROM ingresos WHERE (sesion_id=$sesion_id" . ($facId ? " OR factura_id=$facId" : "") . ") AND tipo='ingreso'");
+                $nuevoAbonoTotal = $rSum ? (float)$rSum->fetch_assoc()['sum_abono'] : $monto;
+
+                $nuevoEstado = ($totalS > 0 && $nuevoAbonoTotal >= $totalS) ? 'pagado' : (($totalS == 0 && $nuevoAbonoTotal > 0) ? 'reserva' : ($nuevoAbonoTotal > 0 ? 'abonado' : 'pendiente'));
+
+                // Actualizar sesión
+                $upS = $db->prepare("UPDATE sesiones SET abono=?, estado_pago=?, metodo_pago=? WHERE id=?");
+                $upS->bind_param("dssi", $nuevoAbonoTotal, $nuevoEstado, $metodo_pago, $sesion_id);
+                $upS->execute(); $upS->close();
+
+                // Actualizar factura vinculada si existe
+                if ($facId) {
+                    $estFac = ($totalS > 0 && $nuevoAbonoTotal >= $totalS) ? 'pagada' : ($nuevoAbonoTotal > 0 ? 'abonada' : 'pendiente');
+                    $upF = $db->prepare("UPDATE facturas SET abono=?, estado=?, metodo_pago=? WHERE id=?");
+                    $upF->bind_param("dssi", $nuevoAbonoTotal, $estFac, $metodo_pago, $facId);
+                    $upF->execute(); $upF->close();
+                }
+
+                $mensaje = "Abono #$numAbono de " . formatoPeso($monto) . " registrado correctamente.";
+                $sesionParamId = $sesion_id;
+            }
+        }
+    }
+
+    // ── Eliminar abono individual ──
+    if ($accion === 'eliminar_abono_sesion') {
+        $abono_id  = sanitizeInt($_POST['abono_id'] ?? 0);
+        $sesion_id = sanitizeInt($_POST['sesion_id'] ?? 0);
+
+        if ($abono_id > 0 && $sesion_id > 0) {
+            $db->query("DELETE FROM ingresos WHERE id=$abono_id");
+
+            $rS = $db->query("SELECT s.total, f.id AS factura_id FROM sesiones s LEFT JOIN facturas f ON f.sesion_id=s.id WHERE s.id=$sesion_id");
+            if ($rS && $rowS = $rS->fetch_assoc()) {
+                $totalS = (float)$rowS['total'];
+                $facId  = !empty($rowS['factura_id']) ? (int)$rowS['factura_id'] : null;
+
+                $rSum = $db->query("SELECT COALESCE(SUM(monto),0) as sum_abono FROM ingresos WHERE (sesion_id=$sesion_id" . ($facId ? " OR factura_id=$facId" : "") . ") AND tipo='ingreso'");
+                $nuevoAbonoTotal = $rSum ? (float)$rSum->fetch_assoc()['sum_abono'] : 0;
+                $nuevoEstado = ($totalS > 0 && $nuevoAbonoTotal >= $totalS) ? 'pagado' : (($totalS == 0 && $nuevoAbonoTotal > 0) ? 'reserva' : ($nuevoAbonoTotal > 0 ? 'abonado' : 'pendiente'));
+
+                $db->query("UPDATE sesiones SET abono=$nuevoAbonoTotal, estado_pago='$nuevoEstado' WHERE id=$sesion_id");
+                if ($facId) {
+                    $estFac = ($totalS > 0 && $nuevoAbonoTotal >= $totalS) ? 'pagada' : ($nuevoAbonoTotal > 0 ? 'abonada' : 'pendiente');
+                    $db->query("UPDATE facturas SET abono=$nuevoAbonoTotal, estado='$estFac' WHERE id=$facId");
+                }
+                $mensaje = "Abono eliminado y saldos recalculados correctamente.";
+                $sesionParamId = $sesion_id;
+            }
         }
     }
 
@@ -261,31 +406,70 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         }
     }
 
-    // ── Eliminar sesión ──
+    // ── Eliminar sesión con sincronización contable ──
     if ($accion === 'eliminar') {
-        $id = sanitizeInt($_POST['id'] ?? 0);
+        $id   = sanitizeInt($_POST['id'] ?? 0);
+        $modo = sanitize($_POST['modo_eliminacion'] ?? 'total'); // 'total' o 'anular_factura'
+
         if ($id > 0) {
-            // Borrar fotos del disco
+            // 1. Borrar fotos físicas del disco
             $r = $db->query("SELECT archivo FROM sesion_fotos WHERE sesion_id=$id");
             while ($row = $r->fetch_assoc()) {
                 $f = UPLOAD_DIR . $row['archivo'];
                 if (file_exists($f)) unlink($f);
             }
-            // Borrar ingresos asociados a esta sesión para que el panel de ingresos refleje el cambio
-            $r2 = $db->query("SELECT cliente_id, fecha_sesion FROM sesiones WHERE id=$id");
-            if ($rowS = $r2->fetch_assoc()) {
-                $fechaFmt      = date('d/m/Y', strtotime($rowS['fecha_sesion']));
+
+            // 2. Obtener datos de la sesión y factura vinculada
+            $rS = $db->query("SELECT s.cliente_id, s.fecha_sesion, f.id AS factura_id, f.numero_factura 
+                              FROM sesiones s 
+                              LEFT JOIN facturas f ON f.sesion_id = s.id 
+                              WHERE s.id=$id");
+            $infoS = $rS ? $rS->fetch_assoc() : null;
+
+            if ($infoS) {
+                $cliId         = (int)$infoS['cliente_id'];
+                $facId         = !empty($infoS['factura_id']) ? (int)$infoS['factura_id'] : null;
+                $fechaFmt      = date('d/m/Y', strtotime($infoS['fecha_sesion']));
                 $pagoConcepto  = "Pago sesión – $fechaFmt";
                 $abonoConcepto = "Abono sesión – $fechaFmt";
-                $cliId         = (int)$rowS['cliente_id'];
-                $sI = $db->prepare("DELETE FROM ingresos WHERE cliente_id=? AND (concepto=? OR concepto=?)");
-                $sI->bind_param("iss", $cliId, $pagoConcepto, $abonoConcepto);
-                $sI->execute();
-                $sI->close();
+
+                // 3. Eliminar únicamente los ingresos asociados a esta sesión específica o su factura
+                if ($facId) {
+                    $sI = $db->prepare("DELETE FROM ingresos WHERE sesion_id=? OR factura_id=?");
+                    $sI->bind_param("ii", $id, $facId);
+                    $sI->execute(); $sI->close();
+                } else {
+                    $sI = $db->prepare("DELETE FROM ingresos WHERE sesion_id=?");
+                    $sI->bind_param("i", $id);
+                    $sI->execute(); $sI->close();
+                }
+
+                // 4. Gestión de la factura vinculada
+                if ($facId) {
+                    if ($modo === 'anular_factura') {
+                        // Opción B: Dejar factura archivada con estado 'cancelada'
+                        $notaCancel = "\n[Sesión eliminada el " . date('d/m/Y') . "]";
+                        $sFac = $db->prepare("UPDATE facturas SET estado='cancelada', abono=0, sesion_id=NULL, notas=CONCAT(COALESCE(notas,''), ?) WHERE id=?");
+                        $sFac->bind_param("si", $notaCancel, $facId);
+                        $sFac->execute(); $sFac->close();
+                    } else {
+                        // Opción A: Limpieza total (borrar factura)
+                        $sFac = $db->prepare("DELETE FROM facturas WHERE id=?");
+                        $sFac->bind_param("i", $facId);
+                        $sFac->execute(); $sFac->close();
+                    }
+                }
             }
+
+            // 5. Eliminar productos adicionales y la sesión
+            $db->query("DELETE FROM sesion_productos WHERE sesion_id=$id");
+            $db->query("DELETE FROM sesion_fotos WHERE sesion_id=$id");
             $s = $db->prepare("DELETE FROM sesiones WHERE id=?");
             $s->bind_param("i", $id); $s->execute(); $s->close();
-            $mensaje = 'Sesión eliminada.';
+
+            $mensaje = ($modo === 'anular_factura')
+                ? 'Sesión eliminada. La factura quedó marcada como cancelada y los ingresos fueron retirados del balance.'
+                : 'Sesión, factura e ingresos asociados eliminados correctamente.';
         }
     }
 }
@@ -344,6 +528,25 @@ if ($rSP) {
     }
 }
 
+// ── Historial de abonos por sesión ──
+$abonosPorSesion = [];
+$abonosPorFactura = [];
+$rAb = $db->query("SELECT id, sesion_id, factura_id, concepto, monto, metodo_pago, fecha, notas 
+                   FROM ingresos 
+                   WHERE tipo='ingreso' AND (sesion_id IS NOT NULL OR factura_id IS NOT NULL) 
+                   ORDER BY fecha ASC, id ASC");
+if ($rAb) {
+    while ($abRow = $rAb->fetch_assoc()) {
+        $sIdAb = (int)($abRow['sesion_id'] ?? 0);
+        $fIdAb = (int)($abRow['factura_id'] ?? 0);
+        if ($sIdAb > 0) {
+            $abonosPorSesion[$sIdAb][] = $abRow;
+        } elseif ($fIdAb > 0) {
+            $abonosPorFactura[$fIdAb][] = $abRow;
+        }
+    }
+}
+
 $fechaIni = "$anioC-$mesC-01";
 $fechaFin = "$anioC-$mesC-$diasMes";
 $stmtCal  = $db->prepare("SELECT s.*,cl.nombre,cl.apellido,cl.telefono,p.nombre AS servicio FROM sesiones s JOIN clientes cl ON s.cliente_id=cl.id LEFT JOIN productos p ON s.producto_id=p.id WHERE s.fecha_sesion BETWEEN ? AND ? ORDER BY s.fecha_sesion, s.hora_sesion, s.id");
@@ -358,6 +561,7 @@ while ($row = $res->fetch_assoc()) {
     $row['adicionales'] = $adicionalesPorSesion[$sid] ?? [];
     // Compatibilidad con el formato anterior.
     $row['servicios_ids'] = array_map(function($a){ return (int)$a['producto_id']; }, $row['adicionales']);
+    $row['abonos'] = $abonosPorSesion[$sid] ?? [];
 
     $d = (int)(new DateTime($row['fecha_sesion']))->format('j');
     $sesionesCalendario[$d][] = $row;
@@ -444,8 +648,10 @@ if (!$rJS) {
 if ($rJS) {
     while ($rowJS = $rJS->fetch_assoc()) {
         $sidJS = (int)$rowJS['id'];
+        $fidJS = (int)($rowJS['factura_id'] ?? 0);
         $rowJS['adicionales'] = $adicionalesPorSesion[$sidJS] ?? [];
         $rowJS['servicios_ids'] = array_map(function($a){ return (int)$a['producto_id']; }, $rowJS['adicionales']);
+        $rowJS['abonos'] = $abonosPorSesion[$sidJS] ?? ($fidJS && isset($abonosPorFactura[$fidJS]) ? $abonosPorFactura[$fidJS] : []);
         $sesionesParaJS[] = $rowJS;
     }
 }
@@ -650,17 +856,38 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
   .page-btn{width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;border:1.5px solid var(--border);background:var(--surface);color:var(--text-mid);text-decoration:none;transition:all .2s;}
   .page-btn:hover{border-color:var(--rose-light);color:var(--rose-deep);}
   .page-btn.active{background:var(--rose);border-color:var(--rose);color:#fff;}
-  /* GALERÍA */
-  .galeria-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:10px;padding:16px;}
+  /* GALERÍA Y CARPETAS */
+  .galeria-tabs{scrollbar-width:thin;}
+  .galeria-tabs::-webkit-scrollbar{height:4px;}
+  .galeria-tabs::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px;}
+  .galeria-tab{padding:6px 14px;border-radius:20px;font-size:11.5px;font-weight:700;border:1.5px solid var(--border);background:var(--surface);color:var(--text-mid);cursor:pointer;transition:all .2s;display:inline-flex;align-items:center;gap:6px;white-space:nowrap;}
+  .galeria-tab:hover{border-color:var(--rose-light);color:var(--rose-deep);}
+  .galeria-tab.active{background:var(--rose-pale);border-color:var(--rose);color:var(--rose-deep);box-shadow:0 2px 8px rgba(232,120,154,.15);}
+  .tab-count{background:rgba(0,0,0,0.06);border-radius:10px;padding:1px 6px;font-size:10px;font-weight:800;}
+  .galeria-tab.active .tab-count{background:var(--rose);color:#fff;}
+  .galeria-grupo-card{transition:transform .15s;}
+  .cat-pill{display:inline-block;letter-spacing:.04em;}
+  .badge-cat-sesion{background:var(--rose-pale);color:var(--rose-deep);}
+  .badge-cat-comprobante{background:#fff4e5;color:#b76e00;}
+  .badge-cat-referencia{background:#eef2ff;color:#4338ca;}
+  .badge-cat-otro{background:#f1f5f9;color:#475569;}
+  .galeria-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;padding:12px 0;}
   .galeria-item{position:relative;border-radius:10px;overflow:hidden;aspect-ratio:1;background:var(--surface2);border:1.5px solid var(--border);}
   .galeria-item img{width:100%;height:100%;object-fit:cover;transition:transform .2s;}
   .galeria-item:hover img{transform:scale(1.05);}
-  .galeria-item .foto-overlay{position:absolute;inset:0;background:rgba(26,31,60,.5);opacity:0;transition:opacity .2s;display:flex;align-items:center;justify-content:center;gap:8px;}
+  .galeria-item .foto-overlay{position:absolute;inset:0;background:rgba(26,31,60,.55);opacity:0;transition:opacity .2s;display:flex;align-items:center;justify-content:center;gap:8px;}
   .galeria-item:hover .foto-overlay{opacity:1;}
-  .foto-btn{width:28px;height:28px;border-radius:50%;background:#fff;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:12px;}
-  .upload-zone{border:2px dashed var(--rose-light);border-radius:12px;padding:24px;text-align:center;cursor:pointer;transition:all .2s;margin:16px;}
+  .foto-btn{width:28px;height:28px;border-radius:50%;background:#fff;border:none;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:12px;box-shadow:0 2px 6px rgba(0,0,0,.2);transition:transform .15s;}
+  .foto-btn:hover{transform:scale(1.15);}
+  .upload-zone{border:2px dashed var(--rose-light);border-radius:12px;padding:20px;text-align:center;cursor:pointer;transition:all .2s;}
   .upload-zone:hover{border-color:var(--rose);background:var(--rose-pale);}
   .upload-zone input{display:none;}
+
+  /* HISTORIAL DE ABONOS */
+  .abono-item{display:flex;align-items:center;justify-content:space-between;background:#fff;border:1.5px solid var(--border);border-radius:10px;padding:9px 12px;transition:all .15s;}
+  .abono-item:hover{border-color:var(--teal-light);box-shadow:var(--shadow-sm);}
+  .abono-num-badge{background:var(--navy);color:#fff;font-size:10.5px;font-weight:800;padding:2px 7px;border-radius:6px;flex-shrink:0;}
+  .abono-metodo-pill{font-size:9.5px;font-weight:700;padding:2px 6px;border-radius:6px;text-transform:uppercase;background:var(--navy-soft);color:var(--navy-mid);}
   /* BUSCADORES DE sesiones y adicionales */
   .producto-picker{position:relative;display:flex;flex-direction:column;gap:7px;}
   .producto-categoria{padding:8px 12px;font-size:11.5px;}
@@ -959,6 +1186,8 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
             $sid = (int)$s['id'];
             $s['adicionales'] = $adicionalesPorSesion[$sid] ?? [];
             $s['servicios_ids'] = array_map(function($a){ return (int)$a['producto_id']; }, $s['adicionales']);
+            $s['abonos'] = $abonosPorSesion[$sid] ?? [];
+            $cntAb = count($s['abonos']);
           ?>
           <tr id="sesion-row-<?= (int)$s['id'] ?>" class="<?= ($sesionParamId===(int)$s['id']) ? 'highlight-row' : '' ?>">
             <td>
@@ -973,6 +1202,11 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
             <td>
               <div style="font-family:'Dancing Script',cursive;font-size:15px;color:var(--navy);"><?= formatoPeso($s['total']) ?></div>
               <?php if(($s['saldo']??0)>0): ?><div style="font-size:10px;color:var(--rose-deep);font-weight:700;">Saldo: <?= formatoPeso($s['saldo']) ?></div><?php endif; ?>
+              <?php if(($s['abono']??0)>0): ?>
+                <div style="font-size:10px;color:var(--teal-deep);font-weight:700;margin-top:2px;cursor:pointer;" onclick="abrirAbonosSesion(<?= (int)$s['id'] ?>)" title="Ver historial de abonos">
+                  💰 <?= formatoPeso($s['abono']) ?><?= $cntAb > 1 ? " <span style='font-size:9px;'>($cntAb abonos)</span>" : "" ?>
+                </div>
+              <?php endif; ?>
             </td>
             <td><span class="status-pill pill-<?= $s['estado_pago'] ?>"><?= ucfirst($s['estado_pago']) ?></span></td>
             <td><span class="status-pill pill-<?= $s['estado_entrega'] ?>"><?= ucfirst(str_replace('_',' ',$s['estado_entrega'])) ?></span></td>
@@ -1092,11 +1326,66 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
         <!-- Total y Abono -->
         <div class="form-row" style="align-items:flex-start;">
           <div class="form-group"><label>Total ($)</label><input class="form-input" type="number" name="total" id="mTotal" min="0" step="1000" placeholder="0" readonly></div>
-          <div class="form-group"><label>Abono Reserva ($)</label><input class="form-input" type="number" name="abono" id="mAbono" min="0" step="1000" placeholder="0"></div>
+          <div class="form-group">
+            <label>Abono Acumulado ($)</label>
+            <input class="form-input" type="number" name="abono" id="mAbono" min="0" step="1000" placeholder="0">
+            <small id="mAbonoHint" style="display:none;font-size:9.5px;color:var(--teal-deep);margin-top:2px;">Calculado de los abonos registrados abajo</small>
+          </div>
           <div class="form-group">
             <label>Saldo Pendiente</label>
             <div id="mSaldo" style="font-size:16px;font-weight:700;color:var(--rose-deep);padding-top:8px;">$0</div>
           </div>
+        </div>
+
+        <!-- SECCIÓN HISTORIAL DE ABONOS ORDENADOS -->
+        <div id="mSeccionAbonos" style="display:none;background:var(--surface2);border:1.5px solid var(--border);border-radius:12px;padding:14px;margin-bottom:14px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;">
+            <div style="font-weight:700;font-size:12.5px;color:var(--navy);display:flex;align-items:center;gap:6px;">
+              <span>💰 Historial de Abonos</span>
+              <span id="mAbonosContador" style="background:var(--rose-pale);color:var(--rose-deep);font-size:10.5px;font-weight:800;padding:2px 8px;border-radius:12px;">0 abonos</span>
+            </div>
+            <button type="button" class="btn btn-teal btn-sm" id="btnToggleNuevoAbono" onclick="toggleFormNuevoAbono()">
+              + Registrar Abono
+            </button>
+          </div>
+
+          <!-- Formulario rápido inline para registrar un nuevo abono -->
+          <div id="formNuevoAbonoWrapper" style="display:none;background:#fff;border:1.5px solid var(--teal-light);border-radius:10px;padding:12px;margin-bottom:12px;box-shadow:var(--shadow-sm);">
+            <div style="font-weight:700;font-size:11.5px;color:var(--teal-deep);margin-bottom:8px;display:flex;align-items:center;gap:6px;">
+              <span>➕ Registrar Nuevo Abono a la Sesión</span>
+            </div>
+            <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px;">
+              <div>
+                <label style="font-size:10px;font-weight:700;color:var(--navy);">Monto ($) *</label>
+                <input type="number" id="newAbonoMonto" class="form-input" min="1000" step="1000" placeholder="Ej: 50000" style="padding:6px 10px;font-size:12px;font-weight:700;">
+              </div>
+              <div>
+                <label style="font-size:10px;font-weight:700;color:var(--navy);">Método de Pago *</label>
+                <select id="newAbonoMetodo" class="form-input" style="padding:6px 10px;font-size:12px;">
+                  <option value="efectivo">Efectivo</option>
+                  <option value="transferencia">Transferencia</option>
+                  <option value="nequi">Nequi</option>
+                  <option value="daviplata">Daviplata</option>
+                  <option value="tarjeta">Tarjeta</option>
+                </select>
+              </div>
+              <div>
+                <label style="font-size:10px;font-weight:700;color:var(--navy);">Fecha *</label>
+                <input type="date" id="newAbonoFecha" class="form-input" value="<?= date('Y-m-d') ?>" style="padding:6px 10px;font-size:12px;">
+              </div>
+            </div>
+            <div style="margin-bottom:8px;">
+              <label style="font-size:10px;font-weight:700;color:var(--navy);">Notas / Referencia (Opcional)</label>
+              <input type="text" id="newAbonoNotas" class="form-input" placeholder="Ej: Comprobante Nequi #9876, Segundo anticipo..." style="padding:6px 10px;font-size:12px;">
+            </div>
+            <div style="display:flex;justify-content:flex-end;gap:8px;">
+              <button type="button" class="btn btn-ghost btn-sm" onclick="toggleFormNuevoAbono(false)">Cancelar</button>
+              <button type="button" class="btn btn-teal btn-sm" onclick="guardarNuevoAbonoModal()">💾 Guardar Abono</button>
+            </div>
+          </div>
+
+          <!-- Contenedor dinámico de abonos ordenados -->
+          <div id="mListaAbonos" style="display:flex;flex-direction:column;gap:6px;"></div>
         </div>
 
         <!-- Estado pago y Método -->
@@ -1141,33 +1430,68 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
 
 <!-- MODAL GALERÍA -->
 <div class="modal-overlay" id="modalGaleria" style="z-index:110;">
-  <div class="modal" style="max-width:640px;">
+  <div class="modal" style="max-width:680px;">
     <div class="modal-header">
       <div class="modal-title" id="galeriaTitulo">Fotos de la Sesión</div>
       <button class="modal-close" onclick="cerrarGaleria()">✕</button>
     </div>
-    <div id="galeriaContenido" style="min-height:200px;">
-      <div style="text-align:center;padding:40px;color:var(--text-dim);">Cargando...</div>
+
+    <!-- PESTAÑAS DE CARPETAS / CATEGORÍAS -->
+    <div class="galeria-tabs" style="display:flex;gap:6px;padding:12px 18px 8px;border-bottom:1px solid var(--border);overflow-x:auto;background:var(--surface2);">
+      <button type="button" class="galeria-tab active" data-cat="todas" onclick="filtrarGaleriaTab('todas')">📁 Todas <span class="tab-count" id="countTodas">0</span></button>
+      <button type="button" class="galeria-tab" data-cat="sesion" onclick="filtrarGaleriaTab('sesion')">📸 Sesión <span class="tab-count" id="countSesion">0</span></button>
+      <button type="button" class="galeria-tab" data-cat="comprobante" onclick="filtrarGaleriaTab('comprobante')">🧾 Comprobantes <span class="tab-count" id="countComprobante">0</span></button>
+      <button type="button" class="galeria-tab" data-cat="referencia" onclick="filtrarGaleriaTab('referencia')">💡 Referencias <span class="tab-count" id="countReferencia">0</span></button>
+      <button type="button" class="galeria-tab" data-cat="otro" onclick="filtrarGaleriaTab('otro')">🗂️ Otros <span class="tab-count" id="countOtro">0</span></button>
     </div>
-    <!-- Subir fotos -->
-    <div style="padding:0 16px 16px;">
+
+    <div id="galeriaContenido" style="min-height:200px;max-height:48vh;overflow-y:auto;">
+      <div style="text-align:center;padding:40px;color:var(--text-dim);">Cargando fotos y carpetas...</div>
+    </div>
+
+    <!-- Subir fotos a carpetas -->
+    <div style="padding:14px 18px 16px;background:var(--surface2);border-top:1px solid var(--border);">
       <form method="POST" action="" enctype="multipart/form-data" id="formFotos">
         <input type="hidden" name="accion" value="subir_fotos">
         <input type="hidden" name="sesion_id" id="galeriaId">
-        <div class="upload-zone" onclick="document.getElementById('inputFotos').click()">
+
+        <div style="font-weight:700;font-size:12px;color:var(--navy);margin-bottom:10px;display:flex;align-items:center;gap:6px;">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+          Subir Fotos a una Carpeta / Grupo
+        </div>
+
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px;">
+          <div>
+            <label style="font-size:10px;font-weight:700;color:var(--navy);">Carpeta / Categoría *</label>
+            <select class="form-input" name="categoria" id="formFotoCategoria" onchange="actualizarPlaceholderGrupo()" style="padding:7px 10px;font-size:12px;">
+              <option value="sesion">📸 Fotos de la Sesión</option>
+              <option value="comprobante">🧾 Comprobantes y Facturas</option>
+              <option value="referencia">💡 Fotos de Referencia</option>
+              <option value="otro">🗂️ Otra Carpeta</option>
+            </select>
+          </div>
+          <div>
+            <label style="font-size:10px;font-weight:700;color:var(--navy);">Nombre del Grupo / Carpeta</label>
+            <input class="form-input" type="text" name="grupo_desc" id="formFotoGrupoDesc" placeholder="Ej: Fotos en exteriores, Abono #2 Nequi..." style="padding:7px 10px;font-size:12px;">
+          </div>
+        </div>
+
+        <div class="upload-zone" onclick="document.getElementById('inputFotos').click()" style="margin:0 0 10px 0;padding:16px;">
           <input type="file" name="fotos[]" id="inputFotos" multiple accept="image/*" onchange="previsualizarFotos(this)">
           <div id="uploadText">
-            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="var(--rose)" stroke-width="1.5" style="margin-bottom:8px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-            <div style="font-size:12px;color:var(--text-dim);font-weight:600;">Clic para subir fotos de la sesión</div>
-            <div style="font-size:10px;color:var(--text-dim);margin-top:4px;">JPG, PNG, WEBP · Puedes subir varias a la vez</div>
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--rose)" stroke-width="1.5" style="margin-bottom:4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+            <div style="font-size:11.5px;color:var(--navy);font-weight:700;">Haz clic para seleccionar fotos</div>
+            <div style="font-size:10px;color:var(--text-dim);margin-top:2px;">JPG, PNG, WEBP · Puedes subir varias fotos a la vez</div>
           </div>
           <div id="previewFotos" style="display:none;display:flex;flex-wrap:wrap;gap:6px;justify-content:center;"></div>
         </div>
-        <div class="form-group" style="margin-bottom:8px;">
-          <label>Descripción (opcional)</label>
-          <input class="form-input" type="text" name="descripcion" placeholder="Ej: Sesión quinceañera terminada">
+
+        <div style="margin-bottom:10px;">
+          <label style="font-size:10px;font-weight:700;color:var(--navy);">Descripción individual de las fotos (opcional)</label>
+          <input class="form-input" type="text" name="descripcion" placeholder="Ej: Comprobante abono por Nequi o foto editada final" style="padding:7px 10px;font-size:12px;">
         </div>
-        <button type="submit" class="btn btn-teal" style="width:100%;justify-content:center;">📤 Subir Fotos</button>
+
+        <button type="submit" class="btn btn-teal" style="width:100%;justify-content:center;padding:9px 16px;">📤 Subir Fotos a esta Carpeta</button>
       </form>
     </div>
   </div>
@@ -1179,15 +1503,96 @@ $mesSig  = $mesC+1; $anioSig  = $anioC; if($mesSig>12){$mesSig=1;$anioSig++;}
   <img src="" id="lightboxImg" alt="">
 </div>
 
-<!-- FORM ELIMINAR -->
+<!-- FORMS DE ACCIONES DIRECTAS -->
 <form method="POST" id="formEliminar" style="display:none;">
   <input type="hidden" name="accion" value="eliminar">
   <input type="hidden" name="id" id="eliminarId">
+  <input type="hidden" name="modo_eliminacion" id="eliminarModo" value="total">
 </form>
 <form method="POST" id="formElimFoto" style="display:none;">
   <input type="hidden" name="accion" value="eliminar_foto">
   <input type="hidden" name="foto_id" id="elimFotoId">
 </form>
+<form method="POST" id="formAbonoDirecto" style="display:none;">
+  <input type="hidden" name="accion" value="registrar_abono_sesion">
+  <input type="hidden" name="sesion_id" id="abonoDirSesionId">
+  <input type="hidden" name="monto" id="abonoDirMonto">
+  <input type="hidden" name="metodo_pago" id="abonoDirMetodo">
+  <input type="hidden" name="fecha" id="abonoDirFecha">
+  <input type="hidden" name="notas" id="abonoDirNotas">
+</form>
+<form method="POST" id="formEliminarAbonoDirecto" style="display:none;">
+  <input type="hidden" name="accion" value="eliminar_abono_sesion">
+  <input type="hidden" name="abono_id" id="elimAbonoId">
+  <input type="hidden" name="sesion_id" id="elimAbonoSesionId">
+</form>
+
+<!-- MODAL CONFIRMAR ELIMINAR INTELIGENTE -->
+<div class="modal-overlay" id="modalEliminarSesion">
+  <div class="modal" style="max-width:500px;">
+    <div class="modal-header" style="background:#fff2f5;border-bottom:1px solid #f9d8e2;">
+      <span class="modal-title" style="color:var(--rose-deep);display:flex;align-items:center;gap:8px;">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>
+        Eliminar Sesión
+      </span>
+      <button type="button" class="modal-close" onclick="cerrarModalEliminar()">✕</button>
+    </div>
+    <div class="modal-body" style="padding:22px 24px;display:flex;flex-direction:column;gap:16px;">
+      
+      <!-- Resumen de la sesión -->
+      <div style="background:var(--surface2);border:1.5px solid var(--border);border-radius:12px;padding:14px 16px;">
+        <div style="font-weight:700;font-size:14px;color:var(--navy);margin-bottom:4px;" id="delClienteNombre">—</div>
+        <div style="font-size:12px;color:var(--text-mid);display:flex;gap:14px;flex-wrap:wrap;">
+          <span>📅 <strong id="delFechaSesion">—</strong></span>
+          <span>📸 <span id="delServicio">—</span></span>
+        </div>
+      </div>
+
+      <!-- Alerta contable si hay factura o abono -->
+      <div id="delBloqueContable" style="display:none;background:#fff8ec;border:1.5px solid #f7dfb3;border-radius:12px;padding:14px 16px;">
+        <div style="font-size:11px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;color:#a06414;margin-bottom:8px;display:flex;align-items:center;gap:6px;">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/></svg>
+          Registros Contables Vinculados
+        </div>
+        <div style="font-size:12px;color:#5a3f12;line-height:1.5;margin-bottom:12px;" id="delDetalleContable"></div>
+
+        <div style="font-size:11.5px;font-weight:700;color:var(--navy);margin-bottom:8px;">¿Qué deseas hacer con la factura y el dinero de caja?</div>
+
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <!-- Opción A -->
+          <label style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;background:#fff;cursor:pointer;">
+            <input type="radio" name="opt_modo_del" value="total" checked style="margin-top:3px;">
+            <div>
+              <div style="font-weight:700;font-size:12px;color:var(--navy);">Opción A: Limpieza Total (Borrar Sesión + Factura + Ingresos)</div>
+              <div style="font-size:11px;color:var(--text-dim);line-height:1.35;margin-top:2px;">Recomendado si fue una sesión creada por error o de prueba. Retira el dinero de caja para que el balance contable no quede inflado.</div>
+            </div>
+          </label>
+          <!-- Opción B -->
+          <label style="display:flex;align-items:flex-start;gap:10px;padding:10px 12px;border:1.5px solid var(--border);border-radius:10px;background:#fff;cursor:pointer;">
+            <input type="radio" name="opt_modo_del" value="anular_factura" style="margin-top:3px;">
+            <div>
+              <div style="font-weight:700;font-size:12px;color:var(--navy);">Opción B: Anulación Contable (Marcar Factura 'Cancelada' y Descontar Ingresos)</div>
+              <div style="font-size:11px;color:var(--text-dim);line-height:1.35;margin-top:2px;">Recomendado si la clienta canceló la cita. La factura queda archivada como cancelada y los abonos se descuentan de caja.</div>
+            </div>
+          </label>
+        </div>
+      </div>
+
+      <!-- Alerta simple si NO tiene dinero ni factura -->
+      <div id="delBloqueSimple" style="font-size:13px;color:var(--text-mid);line-height:1.5;">
+        ¿Estás seguro de que deseas eliminar esta sesión? Esta acción no se puede deshacer y se borrarán las fotos asociadas.
+      </div>
+
+    </div>
+    <div class="modal-footer" style="background:var(--surface2);display:flex;justify-content:flex-end;gap:10px;">
+      <button type="button" class="btn btn-ghost" onclick="cerrarModalEliminar()">Cancelar</button>
+      <button type="button" class="btn btn-danger" onclick="ejecutarEliminacionConfirmada()">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+        Sí, Eliminar Sesión
+      </button>
+    </div>
+  </div>
+</div>
 
 <!-- MODAL FACTURA (muestra el PDF original del módulo Facturas) -->
 <style>
@@ -1360,11 +1765,14 @@ function abrirModalFactura(id) {
       mostrarAvisoFactura('warn', '⚠️ Este equipo no permite compartir archivos PDF. Usa ⬇ Descargar PDF.');
       return;
     }
-    // Algunas apps ignoran el texto cuando se comparte un archivo: se copia al portapapeles por si acaso.
-    try { await navigator.clipboard.writeText(mensaje); } catch (e) {}
+    // Copiar automáticamente el número del cliente al portapapeles para pegarlo en el buscador de WhatsApp
+    const telCliente = String(s.telefono || '').trim();
+    if (telCliente) {
+      try { await navigator.clipboard.writeText(telCliente); } catch (e) {}
+    }
     try {
       await navigator.share({ files: [archivo], title: 'Factura ' + (s.factura_numero || ''), text: mensaje });
-      mostrarAvisoFactura('ok', '✅ Factura compartida. Si el mensaje no apareció en WhatsApp, pégalo con <strong>Ctrl + V</strong>.');
+      mostrarAvisoFactura('ok', '✅ Factura compartida. Número (' + escapeHtml(telCliente || 'cliente') + ') copiado: solo pégalo en el buscador de WhatsApp con <strong>Ctrl + V</strong>.');
     } catch (e) {
       if (e && e.name === 'AbortError') return; // la persona cerró el panel de compartir
       mostrarAvisoFactura('warn', '⚠️ No se pudo abrir el panel de compartir (' + escapeHtml(e && e.message ? e.message : 'error') + '). Usa ⬇ Descargar PDF.');
@@ -1536,6 +1944,7 @@ function editarSesion(s){
   (s.adicionales||[]).forEach(a=>agregarAdicional('m',a.producto_id,a.cantidad||1));
   autoTotalModal();
   actualizarEstadoPago('m');
+  renderizarAbonosModal(s);
   document.getElementById('modalSesion').classList.add('open');
 }
 function editarSesionPorId(id){
@@ -1543,12 +1952,60 @@ function editarSesionPorId(id){
   if(s) editarSesion(s);
 }
 function confirmarEliminar(id,nombre){
-  if(confirm('¿Eliminar sesión de '+nombre+'?')){
-    document.getElementById('eliminarId').value=id;
-    document.getElementById('formEliminar').submit();
+  const s = sesionesData.find(x => Number(x.id) === Number(id));
+  document.getElementById('eliminarId').value = id;
+
+  const nombreCompleto = s ? ((s.nombre||'') + ' ' + (s.apellido||'')).trim() : nombre;
+  document.getElementById('delClienteNombre').textContent = nombreCompleto || 'Cliente';
+  document.getElementById('delFechaSesion').textContent = (s && s.fecha_sesion) ? formatoFechaCorta(s.fecha_sesion) : '—';
+  document.getElementById('delServicio').textContent = (s && s.servicio) ? s.servicio : 'Sesión';
+
+  const tieneFactura = s && s.factura_id;
+  const abonoMonto = s ? Number(s.factura_abono ?? s.abono ?? 0) : 0;
+  const totalMonto = s ? Number(s.factura_total ?? s.total ?? 0) : 0;
+
+  const bloqueContable = document.getElementById('delBloqueContable');
+  const bloqueSimple = document.getElementById('delBloqueSimple');
+  const detalleContable = document.getElementById('delDetalleContable');
+
+  if (tieneFactura || abonoMonto > 0) {
+    bloqueContable.style.display = 'block';
+    bloqueSimple.style.display = 'none';
+
+    let txt = '';
+    if (tieneFactura) {
+      txt += '• <strong>Factura:</strong> ' + escapeHtml(s.factura_numero || 'Generada') + ' (Total: ' + formatoPrecio(totalMonto) + ')<br>';
+    }
+    if (abonoMonto > 0) {
+      txt += '• <strong>Abonos registrados en caja:</strong> ' + formatoPrecio(abonoMonto);
+    } else {
+      txt += '• <em>Sin abonos registrados en caja.</em>';
+    }
+    detalleContable.innerHTML = txt;
+  } else {
+    bloqueContable.style.display = 'none';
+    bloqueSimple.style.display = 'block';
   }
+
+  // Marcar por defecto 'total'
+  const radioTotal = document.querySelector('input[name="opt_modo_del"][value="total"]');
+  if (radioTotal) radioTotal.checked = true;
+
+  document.getElementById('modalEliminarSesion').classList.add('open');
 }
+
+function cerrarModalEliminar(){
+  document.getElementById('modalEliminarSesion').classList.remove('open');
+}
+
+function ejecutarEliminacionConfirmada(){
+  const modoSeleccionado = document.querySelector('input[name="opt_modo_del"]:checked');
+  document.getElementById('eliminarModo').value = modoSeleccionado ? modoSeleccionado.value : 'total';
+  document.getElementById('formEliminar').submit();
+}
+
 document.getElementById('modalSesion').addEventListener('click',function(e){if(e.target===this)cerrarModal();});
+document.getElementById('modalEliminarSesion').addEventListener('click',function(e){if(e.target===this)cerrarModalEliminar();});
 
 function autoTotal(){
   const principal=buscarProducto(document.getElementById('qSesionIdInput').value);
@@ -1593,36 +2050,317 @@ document.getElementById('qAbono').addEventListener('input',()=>actualizarEstadoP
 
 inicializarCategorias();
 
-// ── Galería ──
+// ── Historial de Abonos Ordenados en Modal ──
+function renderizarAbonosModal(s) {
+  const seccion = document.getElementById('mSeccionAbonos');
+  const lista = document.getElementById('mListaAbonos');
+  const contador = document.getElementById('mAbonosContador');
+  const abonoInput = document.getElementById('mAbono');
+  const abonoHint = document.getElementById('mAbonoHint');
+  toggleFormNuevoAbono(false);
+
+  if (!s || !s.id || Number(s.id) === 0) {
+    seccion.style.display = 'none';
+    abonoInput.readOnly = false;
+    abonoInput.style.background = '';
+    if (abonoHint) abonoHint.style.display = 'none';
+    return;
+  }
+
+  seccion.style.display = 'block';
+  const abonos = Array.isArray(s.abonos) ? s.abonos : [];
+  contador.textContent = abonos.length + ' abono' + (abonos.length !== 1 ? 's' : '');
+
+  if (abonos.length > 0) {
+    const sumaAbonos = abonos.reduce((acc, a) => acc + Number(a.monto || 0), 0);
+    abonoInput.value = sumaAbonos;
+    actualizarEstadoPago('m');
+    abonoInput.readOnly = true;
+    abonoInput.style.background = '#f7f4f8';
+    if (abonoHint) abonoHint.style.display = 'block';
+
+    let html = '';
+    abonos.forEach((ab, idx) => {
+      const num = idx + 1;
+      const metodoFmt = (ab.metodo_pago || 'efectivo').toUpperCase();
+      const notasFmt = ab.notas ? `<div style="font-size:11px;color:var(--text-dim);margin-top:2px;">📝 ${escapeHtml(ab.notas)}</div>` : '';
+      html += `
+        <div class="abono-item">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span class="abono-num-badge">#${num}</span>
+            <div>
+              <div style="display:flex;align-items:center;gap:8px;">
+                <strong style="font-size:13px;color:var(--navy);">${formatoPrecio(ab.monto)}</strong>
+                <span class="abono-metodo-pill">${escapeHtml(metodoFmt)}</span>
+              </div>
+              <div style="font-size:10.5px;color:var(--text-dim);margin-top:1px;">
+                📅 ${formatoFechaCorta(ab.fecha)} · ${escapeHtml(ab.concepto || 'Abono #' + num)}
+              </div>
+              ${notasFmt}
+            </div>
+          </div>
+          <div>
+            <button type="button" class="btn btn-danger btn-sm" onclick="confirmarEliminarAbono(${ab.id}, ${s.id}, '${formatoPrecio(ab.monto)}')" title="Eliminar abono">
+              🗑️
+            </button>
+          </div>
+        </div>
+      `;
+    });
+    lista.innerHTML = html;
+  } else {
+    const abonoMonto = Number(s.abono || 0);
+    if (abonoMonto > 0) {
+      abonoInput.readOnly = true;
+      abonoInput.style.background = '#f7f4f8';
+      if (abonoHint) abonoHint.style.display = 'block';
+      contador.textContent = '1 abono';
+      const fechaFmt = s.fecha_sesion ? formatoFechaCorta(s.fecha_sesion) : 'Registrado';
+      const metodoFmt = (s.metodo_pago || 'efectivo').toUpperCase();
+      lista.innerHTML = `
+        <div class="abono-item">
+          <div style="display:flex;align-items:center;gap:10px;">
+            <span class="abono-num-badge">#1</span>
+            <div>
+              <div style="display:flex;align-items:center;gap:8px;">
+                <strong style="font-size:13px;color:var(--navy);">${formatoPrecio(abonoMonto)}</strong>
+                <span class="abono-metodo-pill">${escapeHtml(metodoFmt)}</span>
+              </div>
+              <div style="font-size:10.5px;color:var(--text-dim);margin-top:1px;">
+                📅 ${fechaFmt} · Abono inicial registrado con la sesión
+              </div>
+            </div>
+          </div>
+          <div>
+            <span style="font-size:11px;color:var(--teal-deep);font-weight:700;">Abono Inicial</span>
+          </div>
+        </div>
+      `;
+    } else {
+      abonoInput.readOnly = false;
+      abonoInput.style.background = '';
+      if (abonoHint) abonoHint.style.display = 'none';
+      lista.innerHTML = '<div style="text-align:center;padding:12px;font-size:11.5px;color:var(--text-dim);font-style:italic;">No hay abonos individuales registrados para esta sesión. Usa "+ Registrar Abono" para agregar uno.</div>';
+    }
+  }
+}
+
+function toggleFormNuevoAbono(forzar) {
+  const wrapper = document.getElementById('formNuevoAbonoWrapper');
+  const btn = document.getElementById('btnToggleNuevoAbono');
+  if (!wrapper || !btn) return;
+  const mostrar = forzar !== undefined ? forzar : (wrapper.style.display === 'none');
+  wrapper.style.display = mostrar ? 'block' : 'none';
+  btn.textContent = mostrar ? '✕ Cerrar' : '+ Registrar Abono';
+
+  if (mostrar) {
+    const sId = Number(document.getElementById('mId').value) || 0;
+    const s = sesionesData.find(x => Number(x.id) === sId);
+    const montoEl = document.getElementById('newAbonoMonto');
+    montoEl.value = '';
+    if (s) {
+      const total = Number(s.total || 0);
+      const abono = Number(s.abono || 0);
+      const saldo = Math.max(0, total - abono);
+      if (saldo > 0) montoEl.placeholder = 'Saldo pendiente: ' + formatoPrecio(saldo);
+    }
+    document.getElementById('newAbonoNotas').value = '';
+    montoEl.focus();
+  }
+}
+
+function guardarNuevoAbonoModal() {
+  const sesionId = Number(document.getElementById('mId').value) || 0;
+  const monto = parseFloat(document.getElementById('newAbonoMonto').value) || 0;
+  const metodo = document.getElementById('newAbonoMetodo').value || 'efectivo';
+  const fecha = document.getElementById('newAbonoFecha').value;
+  const notas = document.getElementById('newAbonoNotas').value.trim();
+
+  if (sesionId <= 0) {
+    alert('Debes guardar la sesión primero antes de registrar abonos adicionales.');
+    return;
+  }
+  if (monto <= 0) {
+    alert('Ingresa un monto válido para el abono.');
+    document.getElementById('newAbonoMonto').focus();
+    return;
+  }
+  if (!fecha) {
+    alert('Selecciona la fecha del abono.');
+    return;
+  }
+
+  document.getElementById('abonoDirSesionId').value = sesionId;
+  document.getElementById('abonoDirMonto').value = monto;
+  document.getElementById('abonoDirMetodo').value = metodo;
+  document.getElementById('abonoDirFecha').value = fecha;
+  document.getElementById('abonoDirNotas').value = notas;
+  document.getElementById('formAbonoDirecto').submit();
+}
+
+function confirmarEliminarAbono(abonoId, sesionId, montoTexto) {
+  if (confirm(`¿Estás seguro de que deseas eliminar este abono de ${montoTexto}? El saldo y estado de la sesión y factura se recalcularán automáticamente.`)) {
+    document.getElementById('elimAbonoId').value = abonoId;
+    document.getElementById('elimAbonoSesionId').value = sesionId;
+    document.getElementById('formEliminarAbonoDirecto').submit();
+  }
+}
+
+function abrirAbonosSesion(sesionId, abrirForm = false) {
+  editarSesionPorId(sesionId);
+  setTimeout(() => {
+    const sec = document.getElementById('mSeccionAbonos');
+    if (sec) {
+      sec.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      if (abrirForm) toggleFormNuevoAbono(true);
+    }
+  }, 300);
+}
+
+// ── Galería y Carpetas ──
+let fotosCache = [];
+let tabActualGaleria = 'todas';
+
+function actualizarPlaceholderGrupo() {
+  const elCat = document.getElementById('formFotoCategoria');
+  const inputDesc = document.getElementById('formFotoGrupoDesc');
+  if (!elCat || !inputDesc) return;
+  const cat = elCat.value;
+  if (cat === 'comprobante') {
+    inputDesc.placeholder = 'Ej: Abono #1 Nequi, Recibo consignación, Factura...';
+  } else if (cat === 'referencia') {
+    inputDesc.placeholder = 'Ej: Poses estudio, Ideas vestuario, Paleta colores...';
+  } else if (cat === 'sesion') {
+    inputDesc.placeholder = 'Ej: Fotos finales, Exteriores, Retoque digital...';
+  } else {
+    inputDesc.placeholder = 'Ej: Nombre de la carpeta personalizada...';
+  }
+}
+
+function filtrarGaleriaTab(cat) {
+  tabActualGaleria = cat;
+  document.querySelectorAll('.galeria-tab').forEach(b => {
+    b.classList.toggle('active', b.dataset.cat === cat);
+  });
+  renderFotosGaleria();
+}
+
+function nombreCategoria(cat) {
+  switch(cat) {
+    case 'comprobante': return 'Comprobantes y Facturas';
+    case 'referencia': return 'Fotos de Referencia';
+    case 'otro': return 'Otras fotos';
+    default: return 'Fotos de la Sesión';
+  }
+}
+
+function iconoCategoria(cat) {
+  switch(cat) {
+    case 'comprobante': return '🧾';
+    case 'referencia': return '💡';
+    case 'otro': return '🗂️';
+    default: return '📸';
+  }
+}
+
+function renderFotosGaleria() {
+  const cont = document.getElementById('galeriaContenido');
+  if (!cont) return;
+
+  if (!fotosCache || !fotosCache.length) {
+    cont.innerHTML = '<div style="text-align:center;padding:40px 20px;color:var(--text-dim);font-size:12px;">📁 Esta sesión aún no tiene fotos ni comprobantes guardados.<br><span style="font-size:11px;">Usa el formulario de abajo para subir fotos organizadas en carpetas.</span></div>';
+    return;
+  }
+
+  const filtradas = (tabActualGaleria === 'todas') 
+    ? fotosCache 
+    : fotosCache.filter(f => (f.categoria || 'sesion') === tabActualGaleria);
+
+  if (!filtradas.length) {
+    cont.innerHTML = `<div style="text-align:center;padding:36px 20px;color:var(--text-dim);font-size:12px;">📂 No hay fotos en la carpeta <strong>${escapeHtml(nombreCategoria(tabActualGaleria))}</strong> todavía.<br><span style="font-size:11px;">Selecciona esta categoría abajo para subir archivos aquí.</span></div>`;
+    return;
+  }
+
+  const grupos = {};
+  filtradas.forEach(f => {
+    const nomGrupo = (f.grupo_desc && f.grupo_desc.trim()) ? f.grupo_desc.trim() : nombreCategoria(f.categoria || 'sesion');
+    if (!grupos[nomGrupo]) grupos[nomGrupo] = { categoria: f.categoria || 'sesion', items: [] };
+    grupos[nomGrupo].items.push(f);
+  });
+
+  let html = '<div style="display:flex;flex-direction:column;gap:14px;padding:12px 18px;">';
+  for (const [nomGrupo, datos] of Object.entries(grupos)) {
+    const badgeCls = 'badge-cat-' + datos.categoria;
+    const catIco = iconoCategoria(datos.categoria);
+    html += `
+      <div class="galeria-grupo-card" style="background:#fff;border:1.5px solid var(--border);border-radius:12px;padding:12px;box-shadow:var(--shadow-sm);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;padding-bottom:6px;border-bottom:1px solid var(--border);">
+          <div style="display:flex;align-items:center;gap:7px;">
+            <span style="font-size:15px;">${catIco}</span>
+            <div>
+              <span style="font-weight:700;font-size:12.5px;color:var(--navy);">${escapeHtml(nomGrupo)}</span>
+              <span class="cat-pill ${badgeCls}" style="font-size:9.5px;padding:1px 6px;border-radius:6px;margin-left:6px;font-weight:700;">${escapeHtml(nombreCategoria(datos.categoria))}</span>
+            </div>
+          </div>
+          <span style="font-size:10.5px;color:var(--text-dim);font-weight:600;">${datos.items.length} foto(s)</span>
+        </div>
+        <div class="galeria-grid" style="display:grid;grid-template-columns:repeat(auto-fill, minmax(100px, 1fr));gap:8px;padding:4px 0;">`;
+
+    datos.items.forEach(f => {
+      html += `
+        <div class="galeria-item" style="position:relative;border-radius:8px;overflow:hidden;aspect-ratio:1;border:1px solid var(--border);background:var(--surface2);">
+          <img src="${UPLOAD_URL + f.archivo}" alt="${escapeHtml(f.descripcion || 'foto')}" style="width:100%;height:100%;object-fit:cover;display:block;">
+          <div class="foto-overlay">
+            <button type="button" class="foto-btn" onclick="verFoto('${UPLOAD_URL + f.archivo}')" title="Ver foto">🔍</button>
+            <button type="button" class="foto-btn" onclick="eliminarFoto(${f.id})" title="Eliminar">🗑️</button>
+          </div>
+          ${f.descripcion ? `<div style="position:absolute;bottom:0;left:0;right:0;background:rgba(26,31,60,0.75);color:#fff;font-size:9px;padding:2px 4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;" title="${escapeHtml(f.descripcion)}">${escapeHtml(f.descripcion)}</div>` : ''}
+        </div>`;
+    });
+
+    html += `
+        </div>
+      </div>`;
+  }
+  html += '</div>';
+  cont.innerHTML = html;
+}
+
 function abrirGaleria(sesionId, nombre){
-  document.getElementById('galeriaId').value=sesionId;
-  document.getElementById('galeriaTitulo').textContent='Fotos – '+nombre;
+  document.getElementById('galeriaId').value = sesionId;
+  document.getElementById('galeriaTitulo').textContent = 'Fotos – ' + nombre;
   document.getElementById('modalGaleria').classList.add('open');
+  actualizarPlaceholderGrupo();
   cargarFotos(sesionId);
 }
 function cerrarGaleria(){ document.getElementById('modalGaleria').classList.remove('open'); }
 document.getElementById('modalGaleria').addEventListener('click',function(e){if(e.target===this)cerrarGaleria();});
 
 function cargarFotos(sesionId){
-  fetch('?accion_galeria=1&sesion_id='+sesionId)
-    .then(r=>r.json())
-    .then(fotos=>{
-      const cont=document.getElementById('galeriaContenido');
-      if(!fotos.length){ cont.innerHTML='<div style="text-align:center;padding:30px;color:var(--text-dim);font-size:12px;">Sin fotos subidas aún.</div>'; return; }
-      let html='<div class="galeria-grid">';
-      fotos.forEach(f=>{
-        html+=`<div class="galeria-item">
-          <img src="${UPLOAD_URL+f.archivo}" alt="${f.descripcion||'foto'}">
-          <div class="foto-overlay">
-            <button class="foto-btn" onclick="verFoto('${UPLOAD_URL+f.archivo}')" title="Ver">🔍</button>
-            <button class="foto-btn" onclick="eliminarFoto(${f.id})" title="Eliminar">🗑️</button>
-          </div>
-        </div>`;
-      });
-      html+='</div>';
-      cont.innerHTML=html;
+  const cont = document.getElementById('galeriaContenido');
+  cont.innerHTML = '<div style="text-align:center;padding:40px;color:var(--text-dim);">Cargando fotos y carpetas…</div>';
+  fetch('?accion_galeria=1&sesion_id=' + sesionId)
+    .then(r => r.json())
+    .then(fotos => {
+      fotosCache = Array.isArray(fotos) ? fotos : [];
+
+      const totalCount = fotosCache.length;
+      const cSesion = fotosCache.filter(f => (f.categoria || 'sesion') === 'sesion').length;
+      const cComp = fotosCache.filter(f => f.categoria === 'comprobante').length;
+      const cRef = fotosCache.filter(f => f.categoria === 'referencia').length;
+      const cOtro = fotosCache.filter(f => f.categoria === 'otro').length;
+
+      document.getElementById('countTodas').textContent = totalCount;
+      document.getElementById('countSesion').textContent = cSesion;
+      document.getElementById('countComprobante').textContent = cComp;
+      document.getElementById('countReferencia').textContent = cRef;
+      document.getElementById('countOtro').textContent = cOtro;
+
+      renderFotosGaleria();
     })
-    .catch(()=>{ document.getElementById('galeriaContenido').innerHTML='<div style="padding:20px;text-align:center;color:var(--rose-deep);">Error al cargar fotos.</div>'; });
+    .catch(() => {
+      cont.innerHTML = '<div style="padding:20px;text-align:center;color:var(--rose-deep);">Error al cargar fotos de la sesión.</div>';
+    });
 }
 
 function verFoto(src){ document.getElementById('lightboxImg').src=src; document.getElementById('lightbox').classList.add('open'); }
@@ -1651,7 +2389,7 @@ function previsualizarFotos(input){
 
 // ── Enfoque y resaltado automático desde Dashboard ──
 const targetSesionId = <?= (int)$sesionParamId ?>;
-const autoEditar = <?= (isset($_GET['editar']) && $_GET['editar'] == '1') ? 'true' : 'false' ?>;
+const autoEditar = <?= ((isset($_GET['editar']) && $_GET['editar'] == '1') || in_array($accion ?? '', ['registrar_abono_sesion', 'eliminar_abono_sesion'])) ? 'true' : 'false' ?>;
 
 if (targetSesionId > 0) {
   window.addEventListener('DOMContentLoaded', () => {
@@ -1673,22 +2411,5 @@ if (targetSesionId > 0) {
   });
 }
 </script>
-
-<?php
-// ── Endpoint AJAX para fotos ──
-if (isset($_GET['accion_galeria'])) {
-    $sid = sanitizeInt($_GET['sesion_id'] ?? 0);
-    $rows = [];
-    if ($sid) {
-        $r = $db->query("SELECT id, archivo, descripcion FROM sesion_fotos WHERE sesion_id=$sid ORDER BY fecha_subida DESC");
-        while ($row = $r->fetch_assoc()) $rows[] = $row;
-    }
-    // Limpiar buffer y salir como JSON
-    while (ob_get_level()) ob_end_clean();
-    header('Content-Type: application/json');
-    echo json_encode($rows);
-    exit;
-}
-?>
-  </body>
+</body>
 </html>
