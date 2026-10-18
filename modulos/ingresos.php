@@ -227,6 +227,7 @@ $avClasses     = ['av-a','av-b','av-c','av-d','av-e'];
   .btn-danger:hover{background:var(--rose-pale);}
   .btn-sm{padding:4px 12px;font-size:11px;border-radius:14px;}
   .content{flex:1;overflow-y:auto;padding:22px 26px;display:flex;flex-direction:column;gap:16px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;min-height:0;}
+  .content > *{flex-shrink:0;}
   .content::-webkit-scrollbar{width:4px;}
   .content::-webkit-scrollbar-thumb{background:var(--rose-light);border-radius:2px;}
 

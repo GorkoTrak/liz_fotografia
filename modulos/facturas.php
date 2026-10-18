@@ -7,6 +7,12 @@ $db = getDB();
 $mensaje = '';
 $error   = '';
 
+// Asegurar columna sesion_id en ingresos
+$rCol = $db->query("SHOW COLUMNS FROM `ingresos` LIKE 'sesion_id'");
+if ($rCol && $rCol->num_rows === 0) {
+    $db->query("ALTER TABLE `ingresos` ADD COLUMN `sesion_id` INT NULL AFTER factura_id");
+}
+
 // ============================================
 // ACCIONES POST
 // ============================================
@@ -62,8 +68,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $factura_id_nuevo = $r2->fetch_assoc()['last'];
                 $concepto = "Abono factura $numero_factura";
                 $fecha_hoy = date('Y-m-d');
-                $stmtI = $db->prepare("INSERT INTO ingresos (factura_id, cliente_id, concepto, monto, tipo, metodo_pago, fecha) VALUES (?,?,?,?,'ingreso',?,?)");
-                $stmtI->bind_param("iisdss", $factura_id_nuevo, $cliente_id, $concepto, $abono, $metodo_pago, $fecha_hoy);
+                $stmtI = $db->prepare("INSERT INTO ingresos (sesion_id, factura_id, cliente_id, concepto, monto, tipo, metodo_pago, fecha) VALUES (?,?,?,?,?,'ingreso',?,?)");
+                $stmtI->bind_param("iiisdss", $sesion_id, $factura_id_nuevo, $cliente_id, $concepto, $abono, $metodo_pago, $fecha_hoy);
                 $stmtI->execute();
                 $stmtI->close();
             }
@@ -85,6 +91,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $stmt->close();
 
             // Sincronizar sesión vinculada con los nuevos valores de la factura
+            $sid = 0;
             $rFac = $db->query("SELECT sesion_id, abono, total, estado FROM facturas WHERE id=$id");
             if ($rFac && $rowFac = $rFac->fetch_assoc()) {
                 $sid = (int)$rowFac['sesion_id'];
@@ -101,8 +108,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             // Registrar en ingresos
             $concepto  = "Pago factura $num_factura";
             $fecha_hoy = date('Y-m-d');
-            $stmtI = $db->prepare("INSERT INTO ingresos (factura_id, cliente_id, concepto, monto, tipo, metodo_pago, fecha) VALUES (?,?,?,?,'ingreso',?,?)");
-            $stmtI->bind_param("iisdss", $id, $cliente_id, $concepto, $monto, $metodo_pago, $fecha_hoy);
+            $sidVal    = ($sid > 0) ? $sid : null;
+            $stmtI = $db->prepare("INSERT INTO ingresos (sesion_id, factura_id, cliente_id, concepto, monto, tipo, metodo_pago, fecha) VALUES (?,?,?,?,?,'ingreso',?,?)");
+            $stmtI->bind_param("iiisdss", $sidVal, $id, $cliente_id, $concepto, $monto, $metodo_pago, $fecha_hoy);
             $stmtI->execute();
             $stmtI->close();
             $mensaje = 'Pago registrado correctamente.';
@@ -112,16 +120,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($accion === 'eliminar') {
         $id = sanitizeInt($_POST['id'] ?? 0);
         if ($id > 0) {
+            // Si estaba vinculada a una sesión, sincronizar la sesión
+            $rFac = $db->query("SELECT sesion_id FROM facturas WHERE id=$id");
+            if ($rFac && $rowFac = $rFac->fetch_assoc()) {
+                $sid = (int)($rowFac['sesion_id'] ?? 0);
+                if ($sid > 0) {
+                    $db->query("UPDATE sesiones SET abono=0, estado_pago='pendiente' WHERE id=$sid");
+                }
+            }
+
             // Eliminar ingresos asociados a esta factura
             $sDel = $db->prepare("DELETE FROM ingresos WHERE factura_id=?");
             $sDel->bind_param("i", $id);
             $sDel->execute(); $sDel->close();
+
             // Eliminar la factura
             $stmt = $db->prepare("DELETE FROM facturas WHERE id=?");
             $stmt->bind_param("i", $id);
             $stmt->execute();
             $stmt->close();
-            $mensaje = 'Factura eliminada.';
+            $mensaje = 'Factura eliminada e ingresos de caja sincronizados.';
         }
     }
 }
@@ -249,7 +267,8 @@ $avClasses = ['av-a','av-b','av-c','av-d','av-e'];
   .btn-sm{padding:4px 12px;font-size:11px;border-radius:14px;}
   .btn svg{width:14px;height:14px;}
 
-  .content{flex:1;overflow-y:auto;padding:22px 26px;display:flex;flex-direction:column;gap:16px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;}
+  .content{flex:1;overflow-y:auto;padding:22px 26px;display:flex;flex-direction:column;gap:16px;scrollbar-width:thin;scrollbar-color:var(--border) transparent;min-height:0;}
+  .content > *{flex-shrink:0;}
   .content::-webkit-scrollbar{width:4px;}
   .content::-webkit-scrollbar-thumb{background:var(--rose-light);border-radius:2px;}
 
