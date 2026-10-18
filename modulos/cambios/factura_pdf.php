@@ -120,10 +120,29 @@ $saldo   = $f['saldo'] ?? ($f['total'] - $f['abono']);
 
 // Logo en base64 (si existe)
 $logoTag = '';
-$logoPath = __DIR__ . '/logo.jpg';
-if (file_exists($logoPath)) {
+$posiblesRutasLogo = [
+    UPLOAD_DIR . 'logo_circulo.png',
+    UPLOAD_DIR . 'perfiles/logo_circulo.png',
+    __DIR__ . '/logo_circulo.png',
+    __DIR__ . '/../uploads/logo_circulo.png',
+    UPLOAD_DIR . 'logo.jpg',
+    UPLOAD_DIR . 'perfiles/logo.jpg',
+    __DIR__ . '/logo.jpg',
+    __DIR__ . '/../uploads/logo.jpg',
+];
+
+$logoPath = null;
+foreach ($posiblesRutasLogo as $ruta) {
+    if (file_exists($ruta)) {
+        $logoPath = $ruta;
+        break;
+    }
+}
+
+if ($logoPath && file_exists($logoPath)) {
+    $mime     = (strtolower(pathinfo($logoPath, PATHINFO_EXTENSION)) === 'png') ? 'image/png' : 'image/jpeg';
     $logoData = base64_encode(file_get_contents($logoPath));
-    $logoTag  = '<img src="data:image/jpeg;base64,' . $logoData . '" class="logo-img" alt="Logo">';
+    $logoTag  = '<img src="data:' . $mime . ';base64,' . $logoData . '" class="logo-img" alt="Logo">';
 }
 
 // Construir filas de pagos
@@ -187,13 +206,16 @@ $html = '
   .logo-wrap { display: table; }
   .logo-cell { display: table-cell; vertical-align: middle; }
   .logo-circle {
-    width: 52px; height: 52px; border-radius: 50%;
-    background: linear-gradient(135deg, #f5b8ce, #9ddbd8);
-    text-align: center; line-height: 52px;
-    font-size: 24px; font-weight: 700; color: #1a1f3c;
-    overflow: hidden; display: inline-block;
+    width: 54px; height: 54px;
+    display: inline-block;
   }
-  .logo-img { width: 52px; height: 52px; border-radius: 50%; object-fit: cover; }
+  .logo-fallback {
+    width: 54px; height: 54px; border-radius: 27px;
+    background: linear-gradient(135deg, #f5b8ce, #9ddbd8);
+    text-align: center; line-height: 54px;
+    font-size: 24px; font-weight: 700; color: #1a1f3c;
+  }
+  .logo-img { width: 54px; height: 54px; display: block; }
   .brand-cell { display: table-cell; vertical-align: middle; padding-left: 14px; }
   .brand-name { font-size: 20px; font-weight: 700; color: #ffffff; letter-spacing: -0.3px; }
   .brand-tagline { font-size: 8.5px; color: #9ddbd8; letter-spacing: 0.22em; text-transform: uppercase; margin-top: 3px; font-weight: 600; }
@@ -360,7 +382,7 @@ $html = '
       <div class="header-left">
         <div class="logo-wrap">
           <div class="logo-cell">
-            <div class="logo-circle">' . ($logoTag ?: 'L') . '</div>
+            <div class="logo-circle">' . ($logoTag ?: '<div class="logo-fallback">L</div>') . '</div>
           </div>
           <div class="brand-cell">
             <div class="brand-name">' . htmlspecialchars(SITE_NAME) . '</div>
@@ -511,5 +533,9 @@ $mpdf->SetCreator(SITE_NAME);
 $mpdf->WriteHTML($html);
 
 $nombreArchivo = 'Factura_' . preg_replace('/[^A-Za-z0-9\-]/', '_', $f['numero_factura']) . '.pdf';
-$mpdf->Output($nombreArchivo, \Mpdf\Output\Destination::DOWNLOAD);
+// ?ver=1 → mostrar dentro del navegador (panel de Sesiones). Sin el parámetro se descarga como siempre.
+$destinoPdf = (isset($_GET['ver']) && $_GET['ver'] === '1')
+    ? \Mpdf\Output\Destination::INLINE
+    : \Mpdf\Output\Destination::DOWNLOAD;
+$mpdf->Output($nombreArchivo, $destinoPdf);
 exit;

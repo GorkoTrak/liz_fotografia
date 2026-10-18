@@ -21,8 +21,8 @@ $db = getDB();
 $stmt = $db->prepare("
     SELECT f.*,
            cl.nombre, cl.apellido, cl.telefono, cl.email,
-           s.fecha_sesion,
-           p.nombre AS servicio
+           s.fecha_sesion, s.hora_sesion,
+           p.nombre AS servicio, p.precio AS servicio_precio, p.categoria AS servicio_categoria
     FROM facturas f
     JOIN clientes cl ON f.cliente_id = cl.id
     LEFT JOIN sesiones s ON f.sesion_id = s.id
@@ -39,17 +39,39 @@ if (!$f) {
     exit('Factura no encontrada.');
 }
 
-// Obtener historial de pagos (ingresos relacionados)
+// Historial de abonos: ingresos ligados a la factura o a su sesión
+// (los abonos registrados desde Sesiones quedan con sesion_id).
+$sesionId = (int)($f['sesion_id'] ?? 0);
 $stmtP = $db->prepare("
     SELECT monto, metodo_pago, fecha, concepto
     FROM ingresos
-    WHERE factura_id = ?
-    ORDER BY fecha ASC
+    WHERE tipo = 'ingreso'
+      AND (factura_id = ? OR (? > 0 AND sesion_id = ?))
+    ORDER BY fecha ASC, id ASC
 ");
-$stmtP->bind_param("i", $id);
+$stmtP->bind_param("iii", $id, $sesionId, $sesionId);
 $stmtP->execute();
 $pagos = $stmtP->get_result();
 $stmtP->close();
+
+// Paquetes y adicionales de la sesión
+$adicionales = [];
+if ($sesionId > 0) {
+    $stmtSP = $db->prepare("
+        SELECT sp.cantidad, sp.precio, p.nombre, p.categoria
+        FROM sesion_productos sp
+        JOIN productos p ON sp.producto_id = p.id
+        WHERE sp.sesion_id = ?
+        ORDER BY sp.id ASC
+    ");
+    $stmtSP->bind_param("i", $sesionId);
+    $stmtSP->execute();
+    $resSP = $stmtSP->get_result();
+    while ($sp = $resSP->fetch_assoc()) {
+        $adicionales[] = $sp;
+    }
+    $stmtSP->close();
+}
 
 // ─── Cargar mPDF ─────────────────────────────────────────────────────────────
 $composerAutoload = __DIR__ . '/../vendor/autoload.php';
@@ -91,16 +113,19 @@ require_once $composerAutoload;
 // ─── Generar HTML del PDF ─────────────────────────────────────────────────────
 $estadoColor = [
     'pagada'    => '#2a9d73',
+    'abonada'   => '#b07a30',
     'pendiente' => '#c4547a',
     'cancelada' => '#a899b5',
 ];
 $estadoBg = [
     'pagada'    => '#e8f8f4',
+    'abonada'   => '#fff4e0',
     'pendiente' => '#fce8f0',
     'cancelada' => '#e8eaf6',
 ];
 $estadoLabel = [
     'pagada'    => 'PAGADA',
+    'abonada'   => 'ABONADA',
     'pendiente' => 'PENDIENTE',
     'cancelada' => 'CANCELADA',
 ];
@@ -120,28 +145,136 @@ $saldo   = $f['saldo'] ?? ($f['total'] - $f['abono']);
 
 // Logo en base64 (si existe)
 $logoTag = '';
-$logoPath = __DIR__ . '/logo.jpg';
-if (file_exists($logoPath)) {
-    $logoData = base64_encode(file_get_contents($logoPath));
-    $logoTag  = '<img src="data:image/jpeg;base64,' . $logoData . '" class="logo-img" alt="Logo">';
+$posiblesLogos = [
+    UPLOAD_DIR . 'perfiles/logo_header.jpg',
+    UPLOAD_DIR . 'logo_header.jpg',
+    __DIR__ . '/../uploads/perfiles/logo_header.jpg',
+    __DIR__ . '/../uploads/logo_header.jpg',
+    UPLOAD_DIR . 'perfiles/logo_circulo.png',
+    UPLOAD_DIR . 'logo_circulo.png',
+    __DIR__ . '/../uploads/perfiles/logo_circulo.png',
+    __DIR__ . '/../uploads/logo_circulo.png',
+    UPLOAD_DIR . 'perfiles/logo.jpg',
+    UPLOAD_DIR . 'logo.jpg',
+    __DIR__ . '/../uploads/perfiles/logo.jpg',
+    __DIR__ . '/../uploads/logo.jpg',
+    __DIR__ . '/logo.jpg',
+];
+$logoFile = '';
+foreach ($posiblesLogos as $pl) {
+    if (file_exists($pl)) {
+        $logoFile = $pl;
+        break;
+    }
+}
+if ($logoFile) {
+    $ext = strtolower(pathinfo($logoFile, PATHINFO_EXTENSION));
+    $mime = ($ext === 'png') ? 'image/png' : 'image/jpeg';
+    $logoData = base64_encode(file_get_contents($logoFile));
+    $logoTag  = '<img src="data:' . $mime . ';base64,' . $logoData . '" class="logo-img" alt="Logo">';
 }
 
-// Construir filas de pagos
-$pagosHTML = '';
+// Lista de abonos
 $pagosList = [];
 while ($pago = $pagos->fetch_assoc()) {
     $pagosList[] = $pago;
 }
-if (!empty($pagosList)) {
-    foreach ($pagosList as $pago) {
-        $pagosHTML .= '
-        <tr>
+// Factura con abono pero sin movimientos registrados (datos antiguos): se muestra como un único abono
+if (empty($pagosList) && (float)$f['abono'] > 0) {
+    $pagosList[] = [
+        'monto'       => $f['abono'],
+        'metodo_pago' => $f['metodo_pago'],
+        'fecha'       => $f['fecha_sesion'] ?: $f['fecha_emision'],
+        'concepto'    => 'Abono registrado con la sesión',
+    ];
+}
+
+$pagosHTML  = '';
+$totalPagos = 0;
+foreach ($pagosList as $i => $pago) {
+    $totalPagos += (float)$pago['monto'];
+    $pagosHTML .= '
+        <tr' . ($i % 2 ? ' class="alt"' : '') . '>
+            <td class="td-num">' . ($i + 1) . '</td>
             <td>' . formatoFecha($pago['fecha']) . '</td>
-            <td>' . htmlspecialchars($pago['concepto']) . '</td>
-            <td>' . ($metodosLabel[$pago['metodo_pago']] ?? ucfirst($pago['metodo_pago'])) . '</td>
+            <td>' . ($metodosLabel[$pago['metodo_pago']] ?? ucfirst((string)$pago['metodo_pago'])) . '</td>
+            <td class="td-concepto">' . htmlspecialchars((string)$pago['concepto']) . '</td>
             <td class="td-right">' . formatoPeso($pago['monto']) . '</td>
         </tr>';
-    }
+}
+if ($pagosHTML === '') {
+    $pagosHTML = '<tr><td colspan="5" class="td-empty">Aún no se han registrado abonos para esta factura.</td></tr>';
+}
+
+// Fila de datos del cliente / sesión
+function filaDato($k, $v) {
+    return '<tr><td class="key">' . $k . '</td><td class="val">' . $v . '</td></tr>';
+}
+$clienteFilas = '';
+if (!empty($f['telefono'])) $clienteFilas .= filaDato('Teléfono', htmlspecialchars($f['telefono']));
+if (!empty($f['email']))    $clienteFilas .= filaDato('Email', htmlspecialchars($f['email']));
+if ($clienteFilas === '')   $clienteFilas  = filaDato('Contacto', 'Sin datos de contacto');
+
+$sesionFilas  = filaDato('Servicio', $f['servicio'] ? htmlspecialchars($f['servicio']) : 'Sin servicio específico');
+$sesionFilas .= filaDato('Fecha', $f['fecha_sesion'] ? formatoFecha($f['fecha_sesion']) : '—');
+if (!empty($f['hora_sesion'])) $sesionFilas .= filaDato('Hora', formatoHora($f['hora_sesion']));
+
+// Construir lista de paquetes y adicionales
+$itemsList = [];
+$sumaAdicionales = 0;
+foreach ($adicionales as $ad) {
+    $sumaAdicionales += (float)$ad['precio'] * max(1, (int)$ad['cantidad']);
+}
+
+// 1. Paquete principal de la sesión
+if (!empty($f['servicio'])) {
+    $precioBase = !empty($f['servicio_precio']) ? (float)$f['servicio_precio'] : max(0, (float)$f['total'] - $sumaAdicionales);
+    $itemsList[] = [
+        'nombre'    => 'Paquete ' . $f['servicio'],
+        'categoria' => !empty($f['servicio_categoria']) ? $f['servicio_categoria'] : 'Paquete de Sesión',
+        'cantidad'  => 1,
+        'precio'    => $precioBase,
+        'subtotal'  => $precioBase
+    ];
+}
+
+// 2. Adicionales adquiridos
+foreach ($adicionales as $ad) {
+    $qty = max(1, (int)$ad['cantidad']);
+    $prc = (float)$ad['precio'];
+    $itemsList[] = [
+        'nombre'    => $ad['nombre'],
+        'categoria' => !empty($ad['categoria']) ? $ad['categoria'] : 'Foto / Adicional',
+        'cantidad'  => $qty,
+        'precio'    => $prc,
+        'subtotal'  => $qty * $prc
+    ];
+}
+
+// 3. Fallback si no hay ítems detallados
+if (empty($itemsList)) {
+    $itemsList[] = [
+        'nombre'    => 'Servicio Fotográfico Profesional',
+        'categoria' => 'Servicio',
+        'cantidad'  => 1,
+        'precio'    => (float)$f['total'],
+        'subtotal'  => (float)$f['total']
+    ];
+}
+
+$itemsHTML = '';
+foreach ($itemsList as $i => $it) {
+    $itemsHTML .= '
+        <tr' . ($i % 2 ? ' class="alt"' : '') . '>
+            <td class="td-num">' . ($i + 1) . '</td>
+            <td>
+                <div style="font-weight:700;color:#1a1f3c;">' . htmlspecialchars($it['nombre']) . '</div>
+            </td>
+            <td><span class="cat-pill">' . htmlspecialchars($it['categoria']) . '</span></td>
+            <td class="td-center">' . (int)$it['cantidad'] . '</td>
+            <td class="td-right" style="color:#6b5e7a;">' . formatoPeso($it['precio']) . '</td>
+            <td class="td-right" style="color:#1a1f3c;">' . formatoPeso($it['subtotal']) . '</td>
+        </tr>';
 }
 
 $html = '
@@ -150,357 +283,286 @@ $html = '
 <head>
 <meta charset="UTF-8">
 <style>
-  * { margin:0; padding:0; box-sizing:border-box; }
-
   body {
     font-family: DejaVu Sans, Arial, sans-serif;
     font-size: 10.5px;
     color: #1e1e2e;
-    background: #ffffff;
     line-height: 1.5;
   }
+  table { border-collapse: collapse; }
 
-  /* ═══════════════════════════════════════
-     CABECERA: barra lateral de acento + contenido
-  ═══════════════════════════════════════ */
-  .header-accent {
-    background: #1a1f3c;
-    padding: 0 32px;
-    display: table;
-    width: 100%;
-  }
-  .accent-bar {
-    display: table-cell;
-    width: 5px;
-    background: linear-gradient(180deg, #e8789a 0%, #9e8bc9 100%);
-    border-radius: 0;
-    padding: 0;
-  }
-  .header-inner {
-    display: table;
-    width: 100%;
-    padding: 28px 0 24px 20px;
-  }
-  .header-left  { display: table-cell; vertical-align: middle; width: 60%; }
-  .header-right { display: table-cell; vertical-align: middle; text-align: right; }
-
-  .logo-wrap { display: table; }
-  .logo-cell { display: table-cell; vertical-align: middle; }
+  /* ═══ CABECERA ═══ */
+  .header { width: 100%; background: #1a1f3c; }
+  .header td { padding: 26px 32px 22px; vertical-align: middle; }
   .logo-circle {
-    width: 52px; height: 52px; border-radius: 50%;
-    background: linear-gradient(135deg, #f5b8ce, #9ddbd8);
-    text-align: center; line-height: 52px;
-    font-size: 24px; font-weight: 700; color: #1a1f3c;
-    overflow: hidden; display: inline-block;
+    width: 66px; height: 66px; border-radius: 33px;
+    background: #f5b8ce; text-align: center; line-height: 66px;
+    font-size: 28px; font-weight: 700; color: #1a1f3c;
   }
-  .logo-img { width: 52px; height: 52px; border-radius: 50%; object-fit: cover; }
-  .brand-cell { display: table-cell; vertical-align: middle; padding-left: 14px; }
-  .brand-name { font-size: 20px; font-weight: 700; color: #ffffff; letter-spacing: -0.3px; }
-  .brand-tagline { font-size: 8.5px; color: #9ddbd8; letter-spacing: 0.22em; text-transform: uppercase; margin-top: 3px; font-weight: 600; }
+  .logo-img { width: 66px; height: 66px; }
+  .brand-name    { font-size: 19px; font-weight: 700; color: #ffffff; }
+  .brand-tagline { font-size: 8px; color: #9ddbd8; letter-spacing: 2px; text-transform: uppercase; font-weight: 700; margin-top: 2px; }
+  .factura-label { font-size: 8.5px; color: #a899b5; text-transform: uppercase; letter-spacing: 2px; font-weight: 700; }
+  .factura-num   { font-size: 24px; font-weight: 700; color: #ffffff; }
+  .factura-fecha { font-size: 9px; color: #9ddbd8; margin-top: 3px; }
 
-  .factura-label { font-size: 9px; color: rgba(255,255,255,0.4); text-transform: uppercase; letter-spacing: 0.2em; font-weight: 700; margin-bottom: 6px; }
-  .factura-num   { font-size: 26px; font-weight: 700; color: #ffffff; letter-spacing: -0.5px; line-height: 1; }
-  .factura-fecha { font-size: 9.5px; color: #9ddbd8; margin-top: 5px; }
-
-  /* ═══════════════════════════════════════
-     ESTADO STRIP
-  ═══════════════════════════════════════ */
-  .estado-strip {
-    display: table; width: 100%;
-    background: ' . $eBg . ';
-    border-bottom: 2px solid ' . $eColor . ';
-    padding: 9px 32px;
-  }
-  .estado-left  { display: table-cell; vertical-align: middle; }
-  .estado-right { display: table-cell; vertical-align: middle; text-align: right; }
+  /* ═══ ESTADO ═══ */
+  .estado { width: 100%; background: ' . $eBg . '; border-bottom: 2px solid ' . $eColor . '; }
+  .estado td { padding: 9px 32px; vertical-align: middle; font-size: 9.5px; color: #6b5e7a; }
   .estado-pill {
-    display: inline-block;
-    background: ' . $eColor . '; color: #fff;
-    font-size: 8px; font-weight: 700; letter-spacing: 0.18em;
-    padding: 4px 12px; border-radius: 20px;
-    vertical-align: middle;
+    background: ' . $eColor . '; color: #ffffff;
+    font-size: 8px; font-weight: 700; letter-spacing: 1.5px;
+    padding: 3px 12px; border-radius: 10px;
   }
-  .estado-metodo {
-    font-size: 9.5px; color: #6b5e7a;
-    vertical-align: middle; margin-left: 10px;
-  }
-  .estado-metodo strong { color: #1a1f3c; }
-  .estado-vence { font-size: 9px; color: #6b5e7a; }
+  .estado strong { color: #1a1f3c; }
 
-  /* ═══════════════════════════════════════
-     CUERPO
-  ═══════════════════════════════════════ */
-  .body-wrap { padding: 26px 32px; background: #ffffff; }
+  /* ═══ CUERPO ═══ */
+  .body-wrap { padding: 24px 32px 10px; }
 
-  /* ─ Sección label ─ */
   .sec-label {
-    font-size: 8px; font-weight: 700; letter-spacing: 0.2em;
+    font-size: 8px; font-weight: 700; letter-spacing: 2px;
     text-transform: uppercase; color: #a899b5;
-    margin-bottom: 9px; padding-bottom: 5px;
+    padding-bottom: 5px; margin-bottom: 8px;
     border-bottom: 1px solid #f0e8f0;
   }
 
-  /* ─ Dos columnas ─ */
-  .cols { display: table; width: 100%; margin-bottom: 24px; border-spacing: 0; }
-  .col-l { display: table-cell; width: 54%; vertical-align: top; padding-right: 18px; }
-  .col-r { display: table-cell; vertical-align: top; }
-
-  /* ─ Box cliente ─ */
-  .client-box {
-    border: 1px solid #ede0ea;
-    border-top: 3px solid #e8789a;
-    border-radius: 8px;
-    padding: 14px 16px;
-    background: #fdfbfd;
+  /* Cliente / Sesión */
+  .cols { width: 100%; margin-bottom: 22px; }
+  .box {
+    border: 1px solid #ede0ea; border-radius: 8px;
+    background: #fdfbfd; padding: 12px 16px;
   }
-  .client-name   { font-size: 14px; font-weight: 700; color: #1a1f3c; margin-bottom: 8px; }
-  .client-row    { display: table; width: 100%; margin-bottom: 3px; }
-  .client-key    { display: table-cell; width: 70px; font-size: 9px; color: #a899b5; font-weight: 700; text-transform: uppercase; letter-spacing: 0.1em; padding-top: 1px; }
-  .client-val    { display: table-cell; font-size: 10px; color: #2a2040; font-weight: 600; }
+  .box-rose { border-top: 3px solid #e8789a; }
+  .box-lav  { border-top: 3px solid #9e8bc9; }
+  .box-title { font-size: 13px; font-weight: 700; color: #1a1f3c; margin-bottom: 6px; }
+  .datos { width: 100%; }
+  .datos td.key { width: 68px; padding: 2px 0; font-size: 8.5px; color: #a899b5; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
+  .datos td.val { padding: 2px 0; font-size: 10px; color: #2a2040; font-weight: 600; }
 
-  /* ─ Box resumen financiero ─ */
-  .summary-box {
-    border: 1px solid #ede0ea;
-    border-top: 3px solid #9e8bc9;
-    border-radius: 8px;
-    padding: 14px 16px;
-    background: #fdfbfd;
+  /* Paquetes y adicionales */
+  .items-table { width: 100%; margin-bottom: 20px; }
+  .items-table th {
+    background: #1a1f3c; color: #f5b8ce;
+    font-size: 8px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase;
+    padding: 8px 12px; text-align: left;
   }
-  .sum-row  { display: table; width: 100%; margin-bottom: 7px; }
-  .sum-key  { display: table-cell; font-size: 10px; color: #6b5e7a; }
-  .sum-val  { display: table-cell; text-align: right; font-size: 10px; font-weight: 700; color: #1a1f3c; }
-  .sum-sep  { border: none; border-top: 1px dashed #ddd0e0; margin: 10px 0; }
-
-  .total-block { background: #1a1f3c; border-radius: 6px; padding: 10px 14px; margin-top: 10px; display: table; width: 100%; }
-  .total-key { display: table-cell; font-size: 11px; font-weight: 700; color: rgba(255,255,255,0.7); }
-  .total-val { display: table-cell; text-align: right; font-size: 20px; font-weight: 700; color: #f5b8ce; }
-
-  .saldo-block {
-    margin-top: 8px; border-radius: 6px; padding: 7px 12px;
-    background: #fce8f0; display: table; width: 100%;
-  }
-  .saldo-key { display: table-cell; font-size: 9.5px; font-weight: 700; color: #c4547a; }
-  .saldo-val { display: table-cell; text-align: right; font-size: 12px; font-weight: 700; color: #c4547a; }
-
-  .pagado-block {
-    margin-top: 8px; border-radius: 6px; padding: 7px 12px;
-    background: #e8f8f4; text-align: center;
-    font-size: 10px; font-weight: 700; color: #2a9d73;
-  }
-
-  /* ─ Servicio ─ */
-  .service-block {
-    display: table; width: 100%; margin-bottom: 22px;
-    border: 1px solid #e0d8f0; border-radius: 8px;
-    background: #f8f5fe; padding: 13px 16px;
-  }
-  .service-left  { display: table-cell; vertical-align: middle; width: 65%; }
-  .service-right { display: table-cell; vertical-align: middle; text-align: right; }
-  .service-badge {
-    display: inline-block; background: #9e8bc9; color: #fff;
-    font-size: 7.5px; font-weight: 700; letter-spacing: 0.1em; text-transform: uppercase;
-    padding: 3px 9px; border-radius: 20px; margin-bottom: 5px;
-  }
-  .service-name { font-size: 13px; font-weight: 700; color: #1a1f3c; }
-  .service-date { font-size: 9.5px; color: #6b5e7a; margin-top: 3px; }
-  .service-date strong { color: #1a1f3c; }
-
-  /* ─ Tabla de pagos ─ */
-  .pagos-section { margin-bottom: 22px; }
-  table.pagos-table { width: 100%; border-collapse: collapse; border-radius: 8px; overflow: hidden; }
-  table.pagos-table thead tr { background: #1a1f3c; }
-  table.pagos-table th {
-    color: #f5b8ce; font-size: 8px; font-weight: 700;
-    letter-spacing: 0.15em; text-transform: uppercase;
-    padding: 9px 12px; text-align: left;
-  }
-  table.pagos-table th.right { text-align: right; }
-  table.pagos-table td {
-    padding: 9px 12px; font-size: 10px; color: #4a3d5a;
+  .items-table th.right  { text-align: right; }
+  .items-table th.center { text-align: center; }
+  .items-table th.num    { text-align: center; width: 30px; }
+  .items-table td {
+    padding: 8px 12px; font-size: 10px; color: #4a3d5a;
     border-bottom: 1px solid #f0e8f4;
   }
-  table.pagos-table tr:last-child td { border-bottom: none; }
-  table.pagos-table tbody tr:nth-child(odd) td  { background: #ffffff; }
-  table.pagos-table tbody tr:nth-child(even) td { background: #fdf5f8; }
-  .td-right { text-align: right; font-weight: 700; color: #3a9994; }
+  .items-table tr.alt td { background: #fdf5f8; }
+  .td-center   { text-align: center; font-weight: 600; color: #2a2040; }
+  .cat-pill    { display: inline-block; background: #f0ecfb; color: #9e8bc9; font-size: 7.5px; font-weight: 700; padding: 2px 7px; border-radius: 4px; text-transform: uppercase; }
 
-  /* ─ Notas ─ */
+  /* Historial de abonos */
+  .pagos-table { width: 100%; margin-bottom: 20px; }
+  .pagos-table th {
+    background: #1a1f3c; color: #f5b8ce;
+    font-size: 8px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase;
+    padding: 8px 12px; text-align: left;
+  }
+  .pagos-table th.right { text-align: right; }
+  .pagos-table th.num   { text-align: center; width: 30px; }
+  .pagos-table td {
+    padding: 8px 12px; font-size: 10px; color: #4a3d5a;
+    border-bottom: 1px solid #f0e8f4;
+  }
+  .pagos-table tr.alt td { background: #fdf5f8; }
+  .td-num      { text-align: center; font-weight: 700; color: #3a9994; }
+  .td-concepto { color: #6b5e7a; font-size: 9.5px; }
+  .td-right    { text-align: right; font-weight: 700; color: #3a9994; }
+  .td-empty    { text-align: center; color: #a899b5; font-style: italic; padding: 14px; }
+  .pagos-total td {
+    background: #e0f5f4; font-weight: 700; color: #1a1f3c;
+    border-bottom: none; padding: 9px 12px;
+  }
+
+  /* Resumen */
+  .resumen-wrap { width: 100%; margin-top: 18px; }
+  .resumen { width: 100%; }
+  .resumen td { padding: 6px 14px; font-size: 10.5px; }
+  .resumen td.rk { color: #6b5e7a; }
+  .resumen td.rv { text-align: right; font-weight: 700; color: #1a1f3c; }
+  .resumen tr.total td { background: #1a1f3c; color: #ffffff; font-size: 11px; padding: 10px 14px; }
+  .resumen tr.total td.rv { color: #f5b8ce; font-size: 17px; }
+  .resumen tr.saldo td  { background: #fce8f0; color: #c4547a; font-weight: 700; }
+  .resumen tr.pagada td { background: #e8f8f4; color: #2a9d73; font-weight: 700; text-align: center; }
+
+  /* Notas */
   .notes-box {
-    margin-top: 4px; border-radius: 6px;
-    border-left: 3px solid #e8789a;
+    margin-top: 20px; border-left: 3px solid #e8789a;
     background: #fdf5f8; padding: 10px 14px;
-    font-size: 10px; color: #6b5e7a; line-height: 1.65;
+    font-size: 10px; color: #6b5e7a; line-height: 1.6;
   }
-  .notes-title { font-weight: 700; color: #c4547a; font-size: 9px; text-transform: uppercase; letter-spacing: 0.12em; margin-bottom: 5px; }
+  .notes-title { font-weight: 700; color: #c4547a; font-size: 8.5px; text-transform: uppercase; letter-spacing: 1.5px; margin-bottom: 4px; }
 
-  /* ═══════════════════════════════════════
-     FOOTER
-  ═══════════════════════════════════════ */
-  .footer {
-    background: #1a1f3c;
-    padding: 14px 32px;
-    display: table; width: 100%;
-  }
-  .footer-left  { display: table-cell; vertical-align: middle; }
-  .footer-right { display: table-cell; vertical-align: middle; text-align: right; }
+  /* ═══ FOOTER ═══ */
+  .footer { width: 100%; background: #1a1f3c; }
+  .footer td { padding: 13px 32px; vertical-align: middle; }
   .footer-brand { font-size: 11px; font-weight: 700; color: #f5b8ce; }
-  .footer-sub   { font-size: 8.5px; color: rgba(255,255,255,0.35); margin-top: 2px; }
-  .footer-num   { font-size: 9px; color: rgba(255,255,255,0.5); margin-bottom: 2px; }
-  .footer-gen   { font-size: 8px; color: rgba(255,255,255,0.3); }
-
-  /* ─ Separadores decorativos ─ */
-  .divider { border: none; border-top: 1px solid #f0e8f0; margin: 20px 0; }
+  .footer-sub   { font-size: 8.5px; color: #8a8fb0; margin-top: 2px; }
+  .footer-num   { font-size: 9px; color: #b0b4cc; text-align: right; }
+  .footer-gen   { font-size: 8px; color: #8a8fb0; text-align: right; }
 </style>
 </head>
 <body>
 
   <!-- ══ CABECERA ══ -->
-  <div class="header-accent">
-    <div class="header-inner">
-      <div class="header-left">
-        <div class="logo-wrap">
-          <div class="logo-cell">
-            <div class="logo-circle">' . ($logoTag ?: 'L') . '</div>
-          </div>
-          <div class="brand-cell">
-            <div class="brand-name">' . htmlspecialchars(SITE_NAME) . '</div>
-            <div class="brand-tagline">Fotoestudio Profesional</div>
-          </div>
-        </div>
-      </div>
-      <div class="header-right">
+  <table class="header">
+    <tr>
+      <td style="width:60%;">
+        <table>
+          <tr>
+            <td style="padding:0; vertical-align:middle; width:70px;">
+              ' . ($logoTag ?: '<div class="logo-circle">L</div>') . '
+            </td>
+            <td style="padding:0 0 0 16px; vertical-align:middle;">
+              <div class="brand-name">' . htmlspecialchars(SITE_NAME) . '</div>
+              <div class="brand-tagline">Fotoestudio Profesional</div>
+            </td>
+          </tr>
+        </table>
+      </td>
+      <td style="text-align:right;">
         <div class="factura-label">Factura</div>
         <div class="factura-num">' . htmlspecialchars($f['numero_factura']) . '</div>
         <div class="factura-fecha">Emitida el ' . formatoFecha($f['fecha_emision']) . '</div>
-        ' . ($f['fecha_vencimiento'] ? '<div class="factura-fecha">Vence: ' . formatoFecha($f['fecha_vencimiento']) . '</div>' : '') . '
-      </div>
-    </div>
-  </div>
+      </td>
+    </tr>
+  </table>
 
-  <!-- ══ STRIP DE ESTADO ══ -->
-  <div class="estado-strip">
-    <div class="estado-left">
-      <span class="estado-pill">' . $eLabel . '</span>
-      <span class="estado-metodo">Método: <strong>' . htmlspecialchars($metodo) . '</strong></span>
-    </div>
-    <div class="estado-right">
-      ' . ($f['fecha_vencimiento'] ? '<span class="estado-vence">Vence ' . formatoFecha($f['fecha_vencimiento']) . '</span>' : '') . '
-    </div>
-  </div>
+  <!-- ══ ESTADO ══ -->
+  <table class="estado">
+    <tr>
+      <td>
+        <span class="estado-pill">' . $eLabel . '</span>
+        &nbsp;&nbsp;Método: <strong>' . htmlspecialchars($metodo) . '</strong>
+      </td>
+      <td style="text-align:right;">' . ($f['fecha_vencimiento'] ? 'Vence: <strong>' . formatoFecha($f['fecha_vencimiento']) . '</strong>' : '') . '</td>
+    </tr>
+  </table>
 
   <!-- ══ CUERPO ══ -->
   <div class="body-wrap">
 
-    <!-- CLIENTE + RESUMEN -->
-    <div class="cols">
-
-      <div class="col-l">
-        <div class="sec-label">Facturado a</div>
-        <div class="client-box">
-          <div class="client-name">' . htmlspecialchars($f['nombre'] . ' ' . $f['apellido']) . '</div>
-          ' . ($f['telefono'] ? '
-          <div class="client-row">
-            <div class="client-key">Tel.</div>
-            <div class="client-val">' . htmlspecialchars($f['telefono']) . '</div>
-          </div>' : '') . '
-          ' . ($f['email'] ? '
-          <div class="client-row">
-            <div class="client-key">Email</div>
-            <div class="client-val">' . htmlspecialchars($f['email']) . '</div>
-          </div>' : '') . '
-        </div>
-      </div>
-
-      <div class="col-r">
-        <div class="sec-label">Resumen de pago</div>
-        <div class="summary-box">
-          <div class="sum-row">
-            <div class="sum-key">Subtotal</div>
-            <div class="sum-val">' . formatoPeso($f['total']) . '</div>
+    <!-- CLIENTE + SESIÓN -->
+    <table class="cols">
+      <tr>
+        <td style="width:50%;vertical-align:top;padding-right:9px;">
+          <div class="sec-label">Facturado a</div>
+          <div class="box box-rose">
+            <div class="box-title">' . htmlspecialchars(trim($f['nombre'] . ' ' . $f['apellido'])) . '</div>
+            <table class="datos">' . $clienteFilas . '</table>
           </div>
-          <div class="sum-row">
-            <div class="sum-key">Pagado</div>
-            <div class="sum-val" style="color:#2a9d73;">' . formatoPeso($f['abono']) . '</div>
+        </td>
+        <td style="width:50%;vertical-align:top;padding-left:9px;">
+          <div class="sec-label">Sesión</div>
+          <div class="box box-lav">
+            <table class="datos">' . $sesionFilas . '</table>
           </div>
-          <hr class="sum-sep">
-          <div class="total-block">
-            <div class="total-key">Total</div>
-            <div class="total-val">' . formatoPeso($f['total']) . '</div>
-          </div>
-          ' . ($saldo > 0
-            ? '<div class="saldo-block"><div class="saldo-key">Saldo pendiente</div><div class="saldo-val">' . formatoPeso($saldo) . '</div></div>'
-            : '<div class="pagado-block">Completamente pagada</div>') . '
-        </div>
-      </div>
+        </td>
+      </tr>
+    </table>
 
-    </div>
+    <!-- PAQUETES Y ADICIONALES ADQUIRIDOS -->
+    <div class="sec-label">Paquetes y adicionales adquiridos (' . count($itemsList) . ')</div>
+    <table class="items-table">
+      <thead>
+        <tr>
+          <th class="num">#</th>
+          <th>Descripción</th>
+          <th>Categoría</th>
+          <th class="center" style="width:45px;">Cant.</th>
+          <th class="right" style="width:75px;">Precio unit.</th>
+          <th class="right" style="width:80px;">Subtotal</th>
+        </tr>
+      </thead>
+      <tbody>
+        ' . $itemsHTML . '
+      </tbody>
+    </table>
 
-    <!-- SERVICIO CONTRATADO -->
-    ' . ($f['servicio'] || $f['fecha_sesion'] ? '
-    <div class="sec-label">Servicio contratado</div>
-    <div class="service-block">
-      <div class="service-left">
-        <div class="service-badge">Servicio</div>
-        <div class="service-name">' . ($f['servicio'] ? htmlspecialchars($f['servicio']) : 'Sin servicio específico') . '</div>
-        ' . ($f['fecha_sesion'] ? '<div class="service-date">Sesión: <strong>' . formatoFecha($f['fecha_sesion']) . '</strong></div>' : '') . '
-      </div>
-      <div class="service-right">
-        <div style="font-size:9px;color:#a899b5;font-weight:700;text-transform:uppercase;letter-spacing:.1em;">Valor</div>
-        <div style="font-size:16px;font-weight:700;color:#9e8bc9;margin-top:3px;">' . formatoPeso($f['total']) . '</div>
-      </div>
-    </div>' : '') . '
+    <!-- HISTORIAL DE ABONOS -->
+    <div class="sec-label">Historial de abonos (' . count($pagosList) . ')</div>
+    <table class="pagos-table">
+      <thead>
+        <tr>
+          <th class="num">#</th>
+          <th>Fecha</th>
+          <th>Método</th>
+          <th>Concepto</th>
+          <th class="right">Monto</th>
+        </tr>
+      </thead>
+      <tbody>
+        ' . $pagosHTML . '
+        ' . (!empty($pagosList) ? '
+        <tr class="pagos-total">
+          <td colspan="4">Total abonado</td>
+          <td style="text-align:right;color:#3a9994;">' . formatoPeso($totalPagos) . '</td>
+        </tr>' : '') . '
+      </tbody>
+    </table>
 
-    <!-- HISTORIAL DE PAGOS -->
-    ' . (!empty($pagosList) ? '
-    <div class="pagos-section">
-      <div class="sec-label">Historial de pagos</div>
-      <table class="pagos-table">
-        <thead>
-          <tr>
-            <th>Fecha</th>
-            <th>Concepto</th>
-            <th>Método</th>
-            <th class="right">Monto</th>
-          </tr>
-        </thead>
-        <tbody>
-          ' . $pagosHTML . '
-        </tbody>
-      </table>
-    </div>' : '') . '
+    <!-- RESUMEN -->
+    <table class="resumen-wrap">
+      <tr>
+        <td style="width:50%;"></td>
+        <td style="width:50%;">
+          <div class="sec-label">Resumen</div>
+          <table class="resumen">
+            <tr class="total">
+              <td class="rk" style="color:#ffffff;">Total factura</td>
+              <td class="rv">' . formatoPeso($f['total']) . '</td>
+            </tr>
+            <tr>
+              <td class="rk">Abonado</td>
+              <td class="rv" style="color:#2a9d73;">' . formatoPeso($f['abono']) . '</td>
+            </tr>
+            ' . ($saldo > 0
+              ? '<tr class="saldo"><td>Saldo pendiente</td><td style="text-align:right;">' . formatoPeso($saldo) . '</td></tr>'
+              : '<tr class="pagada"><td colspan="2">Completamente pagada</td></tr>') . '
+          </table>
+        </td>
+      </tr>
+    </table>
 
     <!-- NOTAS -->
     ' . (!empty($f['notas']) ? '
-    <div class="sec-label">Notas</div>
     <div class="notes-box">
+      <div class="notes-title">Notas</div>
       ' . nl2br(htmlspecialchars($f['notas'])) . '
     </div>' : '') . '
 
   </div>
+';
 
-  <!-- ══ FOOTER ══ -->
-  <div class="footer">
-    <div class="footer-left">
-      <div class="footer-brand">' . htmlspecialchars(SITE_NAME) . '</div>
-      <div class="footer-sub">Gracias por confiar en nosotros</div>
-    </div>
-    <div class="footer-right">
-      <div class="footer-num">' . htmlspecialchars($f['numero_factura']) . '</div>
-      <div class="footer-gen">Generado el ' . date('d/m/Y \a \l\a\s H:i') . '</div>
-    </div>
-  </div>
-
-</body>
-</html>';
+$footerHtml = '
+  <table class="footer">
+    <tr>
+      <td>
+        <div class="footer-brand">' . htmlspecialchars(SITE_NAME) . '</div>
+        <div class="footer-sub">Gracias por confiar en nosotros</div>
+      </td>
+      <td>
+        <div class="footer-num">' . htmlspecialchars($f['numero_factura']) . '</div>
+        <div class="footer-gen">Generado el ' . date('d/m/Y \a \l\a\s H:i') . '</div>
+      </td>
+    </tr>
+  </table>';
 
 // ─── Renderizar con mPDF ──────────────────────────────────────────────────────
 $mpdf = new \Mpdf\Mpdf([
     'mode'          => 'utf-8',
     'format'        => 'A4',
     'margin_top'    => 0,
-    'margin_bottom' => 0,
+    'margin_bottom' => 18,
     'margin_left'   => 0,
     'margin_right'  => 0,
+    'margin_footer' => 0,
     'default_font'  => 'dejavusans',
 ]);
 
@@ -508,6 +570,7 @@ $mpdf->SetTitle('Factura ' . $f['numero_factura']);
 $mpdf->SetAuthor(SITE_NAME);
 $mpdf->SetCreator(SITE_NAME);
 
+$mpdf->SetHTMLFooter($footerHtml);
 $mpdf->WriteHTML($html);
 
 $nombreArchivo = 'Factura_' . preg_replace('/[^A-Za-z0-9\-]/', '_', $f['numero_factura']) . '.pdf';
